@@ -18,16 +18,22 @@ from dotenv import load_dotenv
 # 경로 / 환경변수
 # =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RESTART_FILE = os.path.join(BASE_DIR, "restart_channel.json")
-RESTART_PROCESSING_FILE = os.path.join(BASE_DIR, "restart_channel.processing.json")
+DATA_DIR = os.getenv("DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or "/data"
+if not os.path.isdir(DATA_DIR):
+    DATA_DIR = BASE_DIR
+os.makedirs(DATA_DIR, exist_ok=True)
+
+RESTART_FILE = os.path.join(DATA_DIR, "restart_channel.json")
+RESTART_PROCESSING_FILE = os.path.join(DATA_DIR, "restart_channel.processing.json")
+MUSIC_STATE_FILE = os.path.join(DATA_DIR, "music_state.json")
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
-SCHEDULE_FILE = os.path.join(BASE_DIR, "schedule.json")
-COLORS_FILE = os.path.join(BASE_DIR, "colors.json")
+SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
+COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
 
 # =========================
@@ -247,6 +253,61 @@ def load_colors():
         user_colors = {}
 
 
+def save_music_data():
+    data = {}
+
+    guild_ids = set(music_states.keys()) | set(music_queues.keys())
+    for guild_id in guild_ids:
+        state = get_music_state(guild_id)
+        queue = get_guild_queue(guild_id)
+
+        current_query = None
+        if state.get("current") and state["current"].get("query"):
+            current_query = state["current"]["query"]
+
+        queue_queries = [query for _, query in queue if isinstance(query, str)]
+
+        data[str(guild_id)] = {
+            "last_query": state.get("last_query") or current_query,
+            "last_voice_channel_id": state.get("last_voice_channel_id"),
+            "repeat": state.get("repeat", False),
+            "history": [item for item in state.get("history", []) if isinstance(item, str)][-20:],
+            "current_query": current_query,
+            "queue": queue_queries,
+        }
+
+    with open(MUSIC_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_music_data():
+    if not os.path.exists(MUSIC_STATE_FILE):
+        return
+
+    try:
+        with open(MUSIC_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"music_state.json 로드 실패: {e}")
+        return
+
+    if not isinstance(data, dict):
+        return
+
+    for guild_id_text, saved in data.items():
+        try:
+            guild_id = int(guild_id_text)
+        except (TypeError, ValueError):
+            continue
+
+        state = get_music_state(guild_id)
+        state["last_query"] = saved.get("last_query") or saved.get("current_query")
+        state["last_voice_channel_id"] = saved.get("last_voice_channel_id")
+        state["repeat"] = bool(saved.get("repeat", False))
+        state["history"] = [item for item in saved.get("history", []) if isinstance(item, str)][-20:]
+        state["restored_queue"] = [item for item in saved.get("queue", []) if isinstance(item, str)]
+
+
 # =========================
 # 공통 유틸
 # =========================
@@ -301,7 +362,8 @@ def get_music_state(guild_id: int):
             "repeat": False,
             "history": [],
             "last_query": None,
-            "last_voice_channel_id": None
+            "last_voice_channel_id": None,
+            "restored_queue": []
         }
     return music_states[guild_id]
 
@@ -450,9 +512,10 @@ async def play_next(guild_id: int):
             "url": player.webpage_url or player.original_url
         }
         state["last_query"] = query
-        state["last_query"] = query
         if ctx.voice_client and ctx.voice_client.channel:
             state["last_voice_channel_id"] = ctx.voice_client.channel.id
+        state["restored_queue"] = [item for item in queue if isinstance(item, str)]
+        save_music_data()
 
         def after_play(error):
             if error:
@@ -485,6 +548,7 @@ async def play_next(guild_id: int):
             await play_next(guild_id)
         else:
             state["current"] = None
+            save_music_data()
 
 
 # =========================
@@ -766,6 +830,9 @@ class AddSongModal(discord.ui.Modal, title="노래 추가"):
         guild_id = self.ctx.guild.id
         queue = get_guild_queue(guild_id)
         queue.append((self.ctx, self.song.value))
+        state = get_music_state(guild_id)
+        state["last_query"] = self.song.value
+        save_music_data()
 
         voice_client = self.ctx.voice_client
         if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
@@ -1115,6 +1182,7 @@ async def on_ready():
     try:
         load_schedule()
         load_colors()
+        load_music_data()
 
         # 재시동 완료 메시지 처리
         if os.path.exists(RESTART_FILE):
@@ -1244,6 +1312,8 @@ async def restart(ctx):
     except Exception as e:
         print(f"재시작 채널 저장 실패: {e}")
 
+    save_music_data()
+
     try:
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
@@ -1270,6 +1340,7 @@ async def join(ctx):
 
         state = get_music_state(ctx.guild.id)
         state["last_voice_channel_id"] = channel.id
+        save_music_data()
 
         await ctx.send(f"✅ {channel.name} 입장 완료")
 
@@ -1289,6 +1360,8 @@ async def leave(ctx):
         state["current"] = None
         state["history"] = []
         state["repeat"] = False
+        state["restored_queue"] = []
+        save_music_data()
 
         await ctx.voice_client.disconnect()
         await ctx.send("👋 퇴장 완료")
@@ -1320,8 +1393,16 @@ async def play(ctx, *, query: str = None):
         state["last_voice_channel_id"] = ctx.voice_client.channel.id
 
     queue = get_guild_queue(guild_id)
+
+    restored_queue = state.get("restored_queue", [])
+    if restored_queue:
+        for restored_query in restored_queue:
+            queue.append((ctx, restored_query))
+        state["restored_queue"] = []
+
     queue.append((ctx, query))
     state["last_query"] = query
+    save_music_data()
 
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
         await ctx.send(f"🎶 대기열 추가됨: {query}", view=MusicView(ctx))
@@ -1338,6 +1419,8 @@ async def stop(ctx):
     if state.get("current") and state["current"].get("query"):
         state["last_query"] = state["current"]["query"]
     state["current"] = None
+    state["restored_queue"] = []
+    save_music_data()
 
     if ctx.voice_client:
         ctx.voice_client.stop()
