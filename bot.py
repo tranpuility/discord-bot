@@ -409,26 +409,24 @@ class HelpButtonView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
 
-    @discord.ui.button(label="📖 명령어 보기", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary)
     async def show_help(self, interaction: discord.Interaction, button: discord.ui.Button):
         text = (
-            "📌 **명령어 목록**\n\n"
-            "🎵 **노래 기능**\n"
-            "`!입장` : 내가 들어간 음성 채널로 봇 입장\n"
-            "`!퇴장` : 봇 음성 채널 퇴장\n"
-            "`!재생 노래이름` : 노래 검색 후 재생\n"
-            "`!정지` : 현재 재생 중인 노래 정지\n"
-            "`!일시정지` : 노래 일시정지\n"
-            "`!다시재생` : 일시정지한 노래 다시 재생\n"
-            "`!가사 노래이름` : 노래 가사 가져오기\n\n"
-            "📅 **일정 기능**\n"
-            "`!캘린더` : 이번 달 캘린더 보기\n"
-            "`!캘린더 2026 03` : 원하는 달 캘린더 보기\n"
-            "`!일정추가 2026-03-30 18:00 저녁약속` : 일정 추가\n"
-            "`!일정삭제 1` : 1번 일정 삭제\n"
-            "`!일정목록` : 등록된 일정 목록 보기\n\n"
-            "캘린더 버튼 기능:\n"
-            "`이전달` `다음달` `색 선택` `일정등록` `일정삭제` `알림등록` `알림삭제`"
+            "📌 명령어 목록\n\n"
+            "🎵 노래 기능\n"
+            "!입장\n"
+            "!퇴장\n"
+            "!재생 노래이름\n"
+            "!정지\n"
+            "!일시정지\n"
+            "!다시재생\n"
+            "!가사 노래이름\n\n"
+            "📅 일정 기능\n"
+            "!캘린더\n"
+            "!캘린더 2026 03\n"
+            "!일정추가 날짜 시간 내용\n"
+            "!일정삭제 번호\n"
+            "!일정목록"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -576,54 +574,46 @@ class CalendarView(discord.ui.View):
         super().__init__(timeout=None)
         self.year = year
         self.month = month
+
+        # 🔥색선택
+        self.add_item(ColorButton())
         self.add_item(ScheduleAddButton())
-        self.add_item(ColorSelect())
 
-    async def change_month(self, interaction: discord.Interaction, diff: int):
-        new_month = self.month + diff
-        new_year = self.year
-
-        if new_month < 1:
-            new_month = 12
-            new_year -= 1
-        elif new_month > 12:
-            new_month = 1
-            new_year += 1
-
-        self.year = new_year
-        self.month = new_month
-
-        file_path = create_calendar_image(self.year, self.month)
-        new_view = CalendarView(self.year, self.month)
-
-        await interaction.response.edit_message(
-            attachments=[discord.File(file_path)],
-            view=new_view
-        )
+        # 👉 도움말
+        self.add_item(HelpButtonView().children[0])
 
     @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
-    async def prev_month(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.change_month(interaction, -1)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.month -= 1
+        if self.month < 1:
+            self.month = 12
+            self.year -= 1
+
+        file = create_calendar_image(self.year, self.month)
+        await interaction.response.edit_message(
+            attachments=[discord.File(file)],
+            view=self
+        )
 
     @discord.ui.button(label="다음달 ▶", style=discord.ButtonStyle.secondary, row=0)
-    async def next_month(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.change_month(interaction, 1)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.month += 1
+        if self.month > 12:
+            self.month = 1
+            self.year += 1
 
-    @discord.ui.button(label="❔ 도움말", style=discord.ButtonStyle.primary, row=0)
-    async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        help_text = (
-            "**캘린더 도움말**\n\n"
-            "• `이전달` : 이전 달로 이동\n"
-            "• `다음달` : 다음 달로 이동\n"
-            "• `색 선택` : 캘린더 강조 색 변경\n"
-            "• `일정등록` : 선택한 날짜에 일정 추가\n"
-            "• `일정삭제` : 등록된 일정 삭제\n"
-            "• `알림등록` : 일정 알림 켜기\n"
-            "• `알림삭제` : 일정 알림 끄기\n"
-            "• 날짜 칸을 누르면 해당 날짜가 선택됩니다."
+        file = create_calendar_image(self.year, self.month)
+        await interaction.response.edit_message(
+            attachments=[discord.File(file)],
+            view=self
         )
-        await interaction.response.send_message(help_text, ephemeral=True)
 
+    # ✅ 일정등록 먼저
+    @discord.ui.button(label="일정등록", style=discord.ButtonStyle.success, row=1)
+    async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddScheduleModal())
+
+    # ✅ 일정삭제 다음
     @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
     async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not schedule:
@@ -636,6 +626,7 @@ class CalendarView(discord.ui.View):
             ephemeral=True
         )
 
+    # ✅ 알림등록
     @discord.ui.button(label="알림등록", style=discord.ButtonStyle.primary, row=1)
     async def add_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not schedule:
@@ -648,6 +639,7 @@ class CalendarView(discord.ui.View):
             ephemeral=True
         )
 
+    # ✅ 알림삭제
     @discord.ui.button(label="알림삭제", style=discord.ButtonStyle.secondary, row=1)
     async def delete_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not schedule:
