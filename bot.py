@@ -78,7 +78,12 @@ YTDL_OPTIONS = {
     "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
-    "default_search": "ytsearch"
+    "default_search": "ytsearch",
+    "cookiefile": "cookies.txt",
+    "nocheckcertificate": True,
+    "ignoreerrors": False,
+    "logtostderr": False,
+    "source_address": "0.0.0.0"
 }
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
