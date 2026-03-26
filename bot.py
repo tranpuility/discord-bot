@@ -76,13 +76,30 @@ FFMPEG_OPTIONS = {
 }
 
 YTDL_OPTIONS = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
     "quiet": True,
-    "default_search": "ytsearch"
+    "no_warnings": True,
+    "default_search": "ytsearch1",
+    "extract_flat": False,
+    "skip_download": True,
+    "retries": 10,
+    "fragment_retries": 10,
+    "socket_timeout": 20,
+    "nocheckcertificate": True,
+    "geo_bypass": True,
+    "youtube_include_dash_manifest": False,
+    "youtube_include_hls_manifest": False,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"],
+            "player_skip": ["webpage", "configs"]
+        }
+    }
 }
 
-ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+def create_ytdl():
+    return yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -96,18 +113,44 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def from_query(cls, query: str):
         loop = asyncio.get_running_loop()
-        data = await loop.run_in_executor(
-            None,
-            lambda: ytdl.extract_info(query, download=False)
-        )
+
+        def extract_once(target_query: str):
+            return create_ytdl().extract_info(target_query, download=False)
+
+        try:
+            data = await loop.run_in_executor(None, lambda: extract_once(query))
+        except Exception as e:
+            error_text = str(e)
+            lowered = error_text.lower()
+
+            if "429" in error_text or "too many requests" in lowered:
+                raise ValueError(
+                    "유튜브 요청이 잠시 많아서 막혔어. 잠깐 뒤에 다시 시도하거나 다른 곡으로 해줘."
+                )
+
+            if "sign in to confirm" in lowered or "not a bot" in lowered:
+                raise ValueError(
+                    "유튜브에서 봇 확인이 필요하다고 떠서 지금은 그 곡 재생이 어려워. 다른 곡으로 시도해줘."
+                )
+
+            raise ValueError(f"노래 정보를 가져오지 못했어: {error_text}")
 
         if "entries" in data:
-            entries = data.get("entries")
+            entries = [entry for entry in (data.get("entries") or []) if entry]
             if not entries:
                 raise ValueError("검색 결과가 없습니다.")
             data = entries[0]
 
         audio_url = data.get("url")
+        if not audio_url:
+            webpage_url = data.get("webpage_url") or data.get("original_url")
+            if webpage_url:
+                try:
+                    data = await loop.run_in_executor(None, lambda: extract_once(webpage_url))
+                    audio_url = data.get("url")
+                except Exception:
+                    audio_url = None
+
         if not audio_url:
             raise ValueError("재생 가능한 오디오 URL을 찾지 못했어.")
 
@@ -379,7 +422,11 @@ async def play_next(guild_id: int):
 
     except Exception as e:
         await ctx.send(f"오류 발생: {e}")
-        await play_next(guild_id)
+        if queue:
+            await asyncio.sleep(1)
+            await play_next(guild_id)
+        else:
+            state["current"] = None
 
 
 # =========================
