@@ -554,17 +554,11 @@ class ScheduleHelpButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         text = (
-            "📅 일정 명령어
-
-"
-            "!캘린더
-"
-            "!캘린더 2026 03
-"
-            "!일정추가 날짜 시간 내용
-"
-            "!일정삭제 번호
-"
+            "📅 일정 명령어\n\n"
+            "!캘린더\n"
+            "!캘린더 2026 03\n"
+            "!일정추가 날짜 시간 내용\n"
+            "!일정삭제 번호\n"
             "!일정목록"
         )
         await interaction.response.send_message(text, ephemeral=True)
