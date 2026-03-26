@@ -992,11 +992,16 @@ async def on_ready():
                 with open(RESTART_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     channel_id = data.get("channel_id")
+                    message_id = data.get("message_id")
 
-                if channel_id:
+                if channel_id and message_id:
                     channel = bot.get_channel(channel_id)
                     if channel:
-                        await channel.send("✅ 재시동 완료!")
+                        try:
+                            msg = await channel.fetch_message(message_id)
+                            await msg.edit(content="✅ 재시동 완료!")
+                        except Exception:
+                            await channel.send("✅ 재시동 완료!")
 
                 os.remove(RESTART_FILE)
             except Exception as e:
@@ -1023,12 +1028,15 @@ async def on_message(message):
 @bot.command(name="재시동")
 @commands.is_owner()
 async def restart(ctx):
-    await ctx.send("🔄 봇 재시작 중...")
+    restart_msg = await ctx.send("🔄 봇 재시작 중...")
 
-    # 채널 ID 저장
+    # 채널 ID + 메시지 ID 저장
     try:
         with open(RESTART_FILE, "w", encoding="utf-8") as f:
-            json.dump({"channel_id": ctx.channel.id}, f)
+            json.dump({
+                "channel_id": ctx.channel.id,
+                "message_id": restart_msg.id
+            }, f)
     except Exception as e:
         print(f"재시작 채널 저장 실패: {e}")
 
