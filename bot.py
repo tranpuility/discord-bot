@@ -104,6 +104,7 @@ def resolve_cookie_file():
 
 YTDL_OPTIONS = {
     "format": "bestaudio[ext=m4a]/bestaudio/best",
+    "format_sort": ["audio"],
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
