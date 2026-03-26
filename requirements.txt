@@ -1,6 +1,6 @@
 discord.py
 python-dotenv
-aiohttp>=3.13.3
+aiohttp
 yt-dlp
 Pillow
-davey
+PyNaCl
