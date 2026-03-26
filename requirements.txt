@@ -3,4 +3,4 @@ python-dotenv
 aiohttp
 yt-dlp
 Pillow
-PyNaCl
+PyNaCl==1.5.0
