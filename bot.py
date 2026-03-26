@@ -75,15 +75,16 @@ FFMPEG_OPTIONS = {
 }
 
 YTDL_OPTIONS = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "default_search": "ytsearch",
-    "cookiefile": "cookies.txt",
+    "source_address": "0.0.0.0",
     "nocheckcertificate": True,
-    "ignoreerrors": False,
-    "logtostderr": False,
-    "source_address": "0.0.0.0"
+    "ignoreerrors": True,
+    "geo_bypass": True,
+    "geo_bypass_country": "KR",
+    "extract_flat": False
 }
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
