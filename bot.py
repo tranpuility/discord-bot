@@ -32,6 +32,9 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
+YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
+YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "true", "yes", "on")
+
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
@@ -81,6 +84,24 @@ FFMPEG_OPTIONS = {
     "options": "-vn"
 }
 
+
+def resolve_cookie_file():
+    if not YTDLP_USE_COOKIES:
+        return None
+
+    candidates = [
+        YTDLP_COOKIE_FILE,
+        os.path.join(DATA_DIR, "cookies.txt"),
+        os.path.join(BASE_DIR, "cookies.txt"),
+    ]
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+
+    return None
+
+
 YTDL_OPTIONS = {
     "format": "bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
@@ -105,7 +126,11 @@ YTDL_OPTIONS = {
 
 
 def create_ytdl():
-    return yt_dlp.YoutubeDL(YTDL_OPTIONS)
+    options = dict(YTDL_OPTIONS)
+    cookie_file = resolve_cookie_file()
+    if cookie_file:
+        options["cookiefile"] = cookie_file
+    return yt_dlp.YoutubeDL(options)
 
 
 def is_blocked_music_error(error_text: str) -> bool:
@@ -123,7 +148,9 @@ def is_blocked_music_error(error_text: str) -> bool:
 def sanitize_music_error(error: Exception) -> str:
     error_text = str(error)
     if is_blocked_music_error(error_text):
-        return "❌ 유튜브 요청 제한에 걸렸어... 잠시 후 다시 시도해줘!"
+        if resolve_cookie_file():
+            return "❌ 유튜브 요청 제한에 걸렸어... 잠시 후 다시 시도해줘!"
+        return "❌ 유튜브 요청 제한에 걸렸어. cookies.txt를 넣어주면 훨씬 안정적으로 재생할 수 있어!"
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
 
 
@@ -216,7 +243,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     continue
 
         if blocked_error_seen:
-            raise ValueError("유튜브 요청이 잠시 많아서 재생이 어려워. 잠깐 뒤에 다시 시도해줘.")
+            if resolve_cookie_file():
+                raise ValueError("유튜브 요청이 잠시 많아서 재생이 어려워. 잠깐 뒤에 다시 시도해줘.")
+            raise ValueError("유튜브 요청 제한 때문에 재생이 막혔어. cookies.txt를 넣은 뒤 다시 시도해줘.")
         if last_error is not None:
             raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
         raise ValueError("검색 결과가 없습니다.")
@@ -1184,6 +1213,12 @@ async def on_ready():
         load_colors()
         load_music_data()
 
+        cookie_file = resolve_cookie_file()
+        if cookie_file:
+            print(f"yt-dlp cookies 적용됨: {cookie_file}")
+        else:
+            print("yt-dlp cookies 미적용: cookies.txt 없으면 일부 유튜브 재생이 막힐 수 있음")
+
         # 재시동 완료 메시지 처리
         if os.path.exists(RESTART_FILE):
             try:
@@ -1498,6 +1533,15 @@ async def lyrics(ctx, *, song: str = None):
 @bot.command(name="도움말")
 async def help_command(ctx):
     await ctx.send("보고 싶은 기능을 골라줘", view=HelpView())
+
+
+@bot.command(name="쿠키상태")
+async def cookie_status(ctx):
+    cookie_file = resolve_cookie_file()
+    if cookie_file:
+        await ctx.send(f"✅ cookies 적용 중\n경로: `{cookie_file}`")
+    else:
+        await ctx.send("⚠️ cookies.txt가 없어. 유튜브 차단이 걸리면 재생이 안 될 수 있어.")
 
 
 # =========================
