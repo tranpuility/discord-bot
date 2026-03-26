@@ -81,7 +81,6 @@ YTDL_OPTIONS = {
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch1",
-    "extract_flat": False,
     "skip_download": True,
     "retries": 10,
     "fragment_retries": 10,
@@ -98,8 +97,52 @@ YTDL_OPTIONS = {
     }
 }
 
+
 def create_ytdl():
     return yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+
+def is_blocked_music_error(error_text: str) -> bool:
+    lowered = error_text.lower()
+    blocked_keywords = [
+        "429",
+        "too many requests",
+        "sign in to confirm",
+        "not a bot",
+        "confirm you're not a bot"
+    ]
+    return any(keyword in lowered for keyword in blocked_keywords)
+
+
+def sanitize_music_error(error: Exception) -> str:
+    error_text = str(error)
+    if is_blocked_music_error(error_text):
+        return "❌ 유튜브 요청 제한에 걸렸어... 잠시 후 다시 시도해줘!"
+    return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
+
+
+def build_query_candidates(query: str):
+    candidates = []
+
+    def add(value: str):
+        value = value.strip()
+        if value and value not in candidates:
+            candidates.append(value)
+
+    add(query)
+    add(f"ytsearch3:{query}")
+
+    artist, title = extract_artist_title(query)
+    if artist and title:
+        add(f"ytsearch3:{artist} {title} official audio")
+        add(f"ytsearch3:{artist} {title} topic")
+        add(f"ytsearch3:{artist} {title} lyrics")
+    else:
+        add(f"ytsearch3:{query} official audio")
+        add(f"ytsearch3:{query} topic")
+        add(f"ytsearch3:{query} lyrics")
+
+    return candidates[:5]
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -117,45 +160,60 @@ class YTDLSource(discord.PCMVolumeTransformer):
         def extract_once(target_query: str):
             return create_ytdl().extract_info(target_query, download=False)
 
-        try:
-            data = await loop.run_in_executor(None, lambda: extract_once(query))
-        except Exception as e:
-            error_text = str(e)
-            lowered = error_text.lower()
+        def normalize_entries(data):
+            if not data:
+                return []
+            if isinstance(data, dict) and "entries" in data:
+                return [entry for entry in (data.get("entries") or []) if entry]
+            return [data]
 
-            if "429" in error_text or "too many requests" in lowered:
-                raise ValueError(
-                    "유튜브 요청이 잠시 많아서 막혔어. 잠깐 뒤에 다시 시도하거나 다른 곡으로 해줘."
-                )
+        blocked_error_seen = False
+        last_error = None
 
-            if "sign in to confirm" in lowered or "not a bot" in lowered:
-                raise ValueError(
-                    "유튜브에서 봇 확인이 필요하다고 떠서 지금은 그 곡 재생이 어려워. 다른 곡으로 시도해줘."
-                )
+        for candidate in build_query_candidates(query):
+            try:
+                data = await loop.run_in_executor(None, lambda c=candidate: extract_once(c))
+            except Exception as e:
+                last_error = e
+                if is_blocked_music_error(str(e)):
+                    blocked_error_seen = True
+                continue
 
-            raise ValueError(f"노래 정보를 가져오지 못했어: {error_text}")
-
-        if "entries" in data:
-            entries = [entry for entry in (data.get("entries") or []) if entry]
+            entries = normalize_entries(data)
             if not entries:
-                raise ValueError("검색 결과가 없습니다.")
-            data = entries[0]
+                continue
 
-        audio_url = data.get("url")
-        if not audio_url:
-            webpage_url = data.get("webpage_url") or data.get("original_url")
-            if webpage_url:
+            for entry in entries[:3]:
+                current_data = entry
+                audio_url = current_data.get("url")
+
+                if not audio_url:
+                    webpage_url = current_data.get("webpage_url") or current_data.get("original_url")
+                    if webpage_url:
+                        try:
+                            current_data = await loop.run_in_executor(None, lambda u=webpage_url: extract_once(u))
+                            audio_url = current_data.get("url")
+                        except Exception as e:
+                            last_error = e
+                            if is_blocked_music_error(str(e)):
+                                blocked_error_seen = True
+                            continue
+
+                if not audio_url:
+                    continue
+
                 try:
-                    data = await loop.run_in_executor(None, lambda: extract_once(webpage_url))
-                    audio_url = data.get("url")
-                except Exception:
-                    audio_url = None
+                    source = discord.FFmpegPCMAudio(audio_url, **FFMPEG_OPTIONS)
+                    return cls(source, data=current_data)
+                except Exception as e:
+                    last_error = e
+                    continue
 
-        if not audio_url:
-            raise ValueError("재생 가능한 오디오 URL을 찾지 못했어.")
-
-        source = discord.FFmpegPCMAudio(audio_url, **FFMPEG_OPTIONS)
-        return cls(source, data=data)
+        if blocked_error_seen:
+            raise ValueError("유튜브 요청이 잠시 많아서 재생이 어려워. 잠깐 뒤에 다시 시도해줘.")
+        if last_error is not None:
+            raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
+        raise ValueError("검색 결과가 없습니다.")
 
 
 # =========================
@@ -421,7 +479,7 @@ async def play_next(guild_id: int):
         )
 
     except Exception as e:
-        await ctx.send(f"오류 발생: {e}")
+        await ctx.send(sanitize_music_error(e))
         if queue:
             await asyncio.sleep(1)
             await play_next(guild_id)
