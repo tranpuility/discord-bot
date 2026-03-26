@@ -577,35 +577,52 @@ class CalendarView(discord.ui.View):
         self.year = year
         self.month = month
         self.add_item(ScheduleAddButton())
+        self.add_item(ColorSelect())
 
-@discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
-async def prev_month(self, interaction: discord.Interaction, button: discord.ui.Button):
-    await self.change_month(interaction, -1)
+    async def change_month(self, interaction: discord.Interaction, diff: int):
+        new_month = self.month + diff
+        new_year = self.year
 
-@discord.ui.button(label="다음달 ▶", style=discord.ButtonStyle.secondary, row=0)
-async def next_month(self, interaction: discord.Interaction, button: discord.ui.Button):
-    await self.change_month(interaction, 1)
+        if new_month < 1:
+            new_month = 12
+            new_year -= 1
+        elif new_month > 12:
+            new_month = 1
+            new_year += 1
 
-@discord.ui.button(label="🎨 색 선택", style=discord.ButtonStyle.secondary, row=0)
-async def color_select_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-    await interaction.response.send_message(
-        "원하는 색을 선택하세요.",
-        view=ColorSelectView(self),
-        ephemeral=True
-    )
+        self.year = new_year
+        self.month = new_month
 
-@discord.ui.button(label="❔ 도움말", style=discord.ButtonStyle.primary, row=0)
-async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-    help_text = (
-        "**캘린더 도움말**\n\n"
-        "• 일정등록 : 선택한 날짜에 일정 추가\n"
-        "• 일정삭제 : 선택한 날짜의 일정 삭제\n"
-        "• 알림등록 : 선택한 날짜에 알림 추가\n"
-        "• 알림삭제 : 선택한 날짜의 알림 삭제\n"
-        "• 색 선택 : 캘린더 강조 색 변경\n"
-        "• 날짜 클릭 : 날짜 선택"
-    )
-    await interaction.response.send_message(help_text, ephemeral=True)
+        file_path = create_calendar_image(self.year, self.month)
+        new_view = CalendarView(self.year, self.month)
+
+        await interaction.response.edit_message(
+            attachments=[discord.File(file_path)],
+            view=new_view
+        )
+
+    @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
+    async def prev_month(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.change_month(interaction, -1)
+
+    @discord.ui.button(label="다음달 ▶", style=discord.ButtonStyle.secondary, row=0)
+    async def next_month(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.change_month(interaction, 1)
+
+    @discord.ui.button(label="❔ 도움말", style=discord.ButtonStyle.primary, row=0)
+    async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        help_text = (
+            "**캘린더 도움말**\n\n"
+            "• `이전달` : 이전 달로 이동\n"
+            "• `다음달` : 다음 달로 이동\n"
+            "• `색 선택` : 캘린더 강조 색 변경\n"
+            "• `일정등록` : 선택한 날짜에 일정 추가\n"
+            "• `일정삭제` : 등록된 일정 삭제\n"
+            "• `알림등록` : 일정 알림 켜기\n"
+            "• `알림삭제` : 일정 알림 끄기\n"
+            "• 날짜 칸을 누르면 해당 날짜가 선택됩니다."
+        )
+        await interaction.response.send_message(help_text, ephemeral=True)
 
     @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
     async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -642,7 +659,6 @@ async def help_button(self, interaction: discord.Interaction, button: discord.ui
             view=ScheduleSelectView("delete_alert"),
             ephemeral=True
         )
-
 
 # =========================
 # 이벤트
@@ -734,6 +750,19 @@ async def resume(ctx):
         ctx.voice_client.resume()
         await ctx.send("▶️ 다시 재생")
 
+@bot.command(name="노래도움말")
+async def music_help(ctx):
+    text = (
+        "🎵 **노래 기능 도움말**\n\n"
+        "`!입장` : 내가 들어간 음성 채널로 봇 입장\n"
+        "`!퇴장` : 봇이 음성 채널에서 나감\n"
+        "`!재생 노래이름` : 노래 검색 후 재생\n"
+        "`!정지` : 현재 재생 중인 노래 정지\n"
+        "`!일시정지` : 노래 일시정지\n"
+        "`!다시재생` : 일시정지한 노래 다시 재생\n"
+        "`!가사 노래이름` : 노래 가사 보기"
+    )
+    await ctx.send(text)
 
 # =========================
 # 가사 기능
