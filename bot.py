@@ -36,6 +36,7 @@ YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "tru
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
+
 MUSIC_HELP_TEXT = (
     "🎵 노래 명령어\n\n"
     "!입장\n"
@@ -149,14 +150,6 @@ def create_ytdl():
     if cookie_file:
         options["cookiefile"] = cookie_file
     return yt_dlp.YoutubeDL(options)
-
-
-def send_music_help_message():
-    return MUSIC_HELP_TEXT
-
-
-def send_schedule_help_message():
-    return SCHEDULE_HELP_TEXT
 
 
 def is_blocked_music_error(error_text: str) -> bool:
@@ -740,11 +733,11 @@ class HelpView(discord.ui.View):
 
     @discord.ui.button(label="🎵 노래", style=discord.ButtonStyle.primary)
     async def music_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(send_music_help_message(), ephemeral=True)
+        await interaction.response.send_message(MUSIC_HELP_TEXT, ephemeral=True)
 
     @discord.ui.button(label="📅 일정", style=discord.ButtonStyle.success)
     async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(send_schedule_help_message(), ephemeral=True)
+        await interaction.response.send_message(SCHEDULE_HELP_TEXT, ephemeral=True)
 
 
 class ScheduleHelpButton(discord.ui.Button):
@@ -752,7 +745,7 @@ class ScheduleHelpButton(discord.ui.Button):
         super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message(send_schedule_help_message(), ephemeral=True)
+        await interaction.response.send_message(SCHEDULE_HELP_TEXT, ephemeral=True)
 
 
 class ScheduleListButton(discord.ui.Button):
@@ -1168,7 +1161,7 @@ class MusicView(discord.ui.View):
 
     @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
     async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(send_music_help_message(), ephemeral=True)
+        await interaction.response.send_message(MUSIC_HELP_TEXT, ephemeral=True)
 
     @discord.ui.button(label="➕ 노래추가", style=discord.ButtonStyle.success, row=1)
     async def add_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
