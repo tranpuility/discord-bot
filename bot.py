@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 # 경로 / 환경변수
 # =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RESTART_FILE = os.path.join(BASE_DIR, "restart_channel.json")
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 TOKEN = os.getenv("TOKEN")
@@ -985,6 +986,22 @@ async def on_ready():
         load_schedule()
         load_colors()
 
+        # 재시동 완료 메시지 처리
+        if os.path.exists(RESTART_FILE):
+            try:
+                with open(RESTART_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    channel_id = data.get("channel_id")
+
+                if channel_id:
+                    channel = bot.get_channel(channel_id)
+                    if channel:
+                        await channel.send("✅ 재시동 완료!")
+
+                os.remove(RESTART_FILE)
+            except Exception as e:
+                print(f"재시동 완료 처리 실패: {e}")
+
         if not schedule_task_started:
             bot.loop.create_task(check_schedule())
             schedule_task_started = True
@@ -1007,6 +1024,13 @@ async def on_message(message):
 @commands.is_owner()
 async def restart(ctx):
     await ctx.send("🔄 봇 재시작 중...")
+
+    # 채널 ID 저장
+    try:
+        with open(RESTART_FILE, "w", encoding="utf-8") as f:
+            json.dump({"channel_id": ctx.channel.id}, f)
+    except Exception as e:
+        print(f"재시작 채널 저장 실패: {e}")
 
     try:
         if ctx.voice_client:
