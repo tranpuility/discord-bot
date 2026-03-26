@@ -1,1 +1,4 @@
 .env
+ffmpeg-8.1-essentials_build/
+calendar_output.png
+__pycache__/
