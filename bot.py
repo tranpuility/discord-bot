@@ -548,6 +548,28 @@ class HelpButton(discord.ui.Button):
         await interaction.response.send_message("보고 싶은 기능을 골라줘", view=HelpView(), ephemeral=True)
 
 
+class ScheduleHelpButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        text = (
+            "📅 일정 명령어
+
+"
+            "!캘린더
+"
+            "!캘린더 2026 03
+"
+            "!일정추가 날짜 시간 내용
+"
+            "!일정삭제 번호
+"
+            "!일정목록"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
+
+
 class ScheduleListButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="📋 일정리스트", style=discord.ButtonStyle.secondary, row=0)
@@ -757,7 +779,7 @@ class CalendarView(discord.ui.View):
 
         self.add_item(ColorButton())
         self.add_item(ScheduleListButton())
-        self.add_item(HelpButton())
+        self.add_item(ScheduleHelpButton())
 
     @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
     async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
