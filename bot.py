@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import json
 import os
+import sys
 import asyncio
 import aiohttp
 import yt_dlp
@@ -512,25 +513,21 @@ class HelpView(discord.ui.View):
             "!일시정지\n"
             "!다시재생\n"
             "!가사 가수 - 제목\n"
-            "!노래리스트\n\n"
-            "🎛 노래 UI 버튼\n"
-            "1줄: ⏮ 이전곡 / ⏭ 다음곡 / ▶ / ⏹ / 🔁\n"
-            "2줄: 📜 노래리스트 / 📄 가사 / 📖 도움말 / ➕ 노래추가 / 🗑 노래삭제"
+            "!노래리스트"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
     @discord.ui.button(label="📅 일정", style=discord.ButtonStyle.success)
-async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-    text = (
-        "📅 일정 명령어\n\n"
-        "!캘린더\n"
-        "!캘린더 2026 03\n"
-        "!일정추가 날짜 시간 내용\n"
-        "!일정삭제 번호\n"
-        "!일정목록"
-    )
-
-    await interaction.response.send_message(text, ephemeral=True)
+    async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        text = (
+            "📅 일정 명령어\n\n"
+            "!캘린더\n"
+            "!캘린더 2026 03\n"
+            "!일정추가 날짜 시간 내용\n"
+            "!일정삭제 번호\n"
+            "!일정목록"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
 
 
 class HelpButton(discord.ui.Button):
@@ -946,20 +943,19 @@ class MusicView(discord.ui.View):
             await interaction.followup.send(f"```{chunk}```", ephemeral=True)
 
     @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
-async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-    text = (
-        "🎵 노래 명령어\n\n"
-        "!입장\n"
-        "!퇴장\n"
-        "!재생 노래이름\n"
-        "!정지\n"
-        "!일시정지\n"
-        "!다시재생\n"
-        "!노래리스트\n"
-        "!가사 가수 - 제목"
-    )
-
-    await interaction.response.send_message(text, ephemeral=True)
+    async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        text = (
+            "🎵 노래 명령어\n\n"
+            "!입장\n"
+            "!퇴장\n"
+            "!재생 노래이름\n"
+            "!정지\n"
+            "!일시정지\n"
+            "!다시재생\n"
+            "!노래리스트\n"
+            "!가사 가수 - 제목"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
 
     @discord.ui.button(label="➕ 노래추가", style=discord.ButtonStyle.success, row=1)
     async def add_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1007,6 +1003,21 @@ async def on_message(message):
 # =========================
 # 음악 명령어
 # =========================
+@bot.command(name="재시동")
+@commands.is_owner()
+async def restart(ctx):
+    await ctx.send("🔄 봇 재시작 중...")
+
+    try:
+        if ctx.voice_client:
+            await ctx.voice_client.disconnect()
+    except Exception:
+        pass
+
+    await bot.close()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 @bot.command(name="입장")
 async def join(ctx):
     if ctx.author.voice is None:
@@ -1203,4 +1214,10 @@ async def list_schedule(ctx):
 # =========================
 # 실행
 # =========================
+@restart.error
+async def restart_error(ctx, error):
+    if isinstance(error, commands.NotOwner):
+        await ctx.send("❌ 이 명령어는 봇 관리자만 사용할 수 있어.")
+
+
 bot.run(TOKEN)
