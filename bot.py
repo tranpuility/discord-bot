@@ -32,12 +32,17 @@ CALENDAR_OUTPUT_FILE = os.path.join(BASE_DIR, "calendar_output.png")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 schedule = []
 user_colors = {}
 sent_alerts = set()
+schedule_task_started = False
+
+# guild별 음악 대기열
+music_queues = {}
 
 # =========================
 # 색상 설정
@@ -54,7 +59,6 @@ PASTEL_COLORS = {
     "pastel_blue": {"label": "🌊 블루", "rgb": [162, 196, 255]},
     "pastel_purple": {"label": "🍇 퍼플", "rgb": [200, 180, 255]},
 }
-
 DEFAULT_COLOR = PASTEL_COLORS["pastel_blue"]["rgb"]
 
 # =========================
@@ -157,6 +161,12 @@ def get_month_schedule_map(year: int, month: int):
     return date_map
 
 
+def get_guild_queue(guild_id: int):
+    if guild_id not in music_queues:
+        music_queues[guild_id] = []
+    return music_queues[guild_id]
+
+
 # =========================
 # 일정 알림 체크
 # =========================
@@ -169,6 +179,7 @@ async def check_schedule():
         for item in schedule:
             event_dt = item.get("datetime")
             channel_id = item.get("channel_id")
+            user_id = item.get("user_id")
 
             if not event_dt or not channel_id:
                 continue
@@ -183,19 +194,90 @@ async def check_schedule():
                 except ValueError:
                     continue
 
+                # 정시 알림
                 if event_dt not in sent_alerts and now == event_dt:
-                    await channel.send(f"🔔 {item['name']}님의 일정 알림: {item['text']}")
+                    try:
+                        await channel.send(f"🔔 {item['name']}님의 일정 알림: {item['text']}")
+                    except Exception:
+                        pass
+
+                    if user_id:
+                        user = bot.get_user(user_id)
+                        if user is None:
+                            try:
+                                user = await bot.fetch_user(user_id)
+                            except Exception:
+                                user = None
+
+                        if user:
+                            try:
+                                await user.send(f"🔔 일정 알림: {item['text']} ({event_dt})")
+                            except Exception:
+                                pass
+
                     sent_alerts.add(event_dt)
 
+                # 10분 전 알림
                 if item.get("alert_10min", False):
                     before_dt = (event_time - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M")
                     before_key = f"{event_dt}_10min"
 
                     if before_key not in sent_alerts and now == before_dt:
-                        await channel.send(f"⏰ 10분 전 알림: {item['name']}님의 일정 {item['text']}")
+                        try:
+                            await channel.send(f"⏰ 10분 전 알림: {item['name']}님의 일정 {item['text']}")
+                        except Exception:
+                            pass
+
+                        if user_id:
+                            user = bot.get_user(user_id)
+                            if user is None:
+                                try:
+                                    user = await bot.fetch_user(user_id)
+                                except Exception:
+                                    user = None
+
+                            if user:
+                                try:
+                                    await user.send(f"⏰ 10분 전 알림: {item['text']} ({event_dt})")
+                                except Exception:
+                                    pass
+
                         sent_alerts.add(before_key)
 
         await asyncio.sleep(30)
+
+
+# =========================
+# 음악 대기열
+# =========================
+async def play_next(guild_id: int):
+    queue = get_guild_queue(guild_id)
+    if not queue:
+        return
+
+    ctx, query = queue.pop(0)
+
+    if ctx.voice_client is None:
+        return
+
+    try:
+        player = await YTDLSource.from_query(query)
+
+        def after_play(error):
+            if error:
+                print(f"재생 후 오류: {error}")
+            future = asyncio.run_coroutine_threadsafe(play_next(guild_id), bot.loop)
+            try:
+                future.result()
+            except Exception as e:
+                print(f"다음 곡 처리 오류: {e}")
+
+        ctx.voice_client.play(player, after=after_play)
+        await ctx.send(f"🎵 재생 중: **{player.title}**")
+
+    except Exception as e:
+        await ctx.send(f"오류 발생: {e}")
+        await play_next(guild_id)
 
 
 # =========================
@@ -206,7 +288,6 @@ def create_calendar_image(year: int, month: int):
     image = Image.new("RGB", (width, height), (20, 20, 24))
     draw = ImageDraw.Draw(image)
 
-    # 색상
     outer_bg = (20, 20, 24)
     card_bg = (245, 243, 247)
     card_outline = (223, 219, 231)
@@ -220,7 +301,6 @@ def create_calendar_image(year: int, month: int):
     today_fill = (250, 247, 248)
     section_bg = (236, 234, 239)
 
-    # 폰트
     title_font = get_font(42)
     header_font = get_font(18)
     day_font = get_font(20)
@@ -228,7 +308,6 @@ def create_calendar_image(year: int, month: int):
     bottom_title_font = get_font(18)
     bottom_text_font = get_font(15)
 
-    # 큰 카드
     card_x1, card_y1, card_x2, card_y2 = 55, 40, 1045, 1210
     draw.rounded_rectangle(
         (card_x1, card_y1, card_x2, card_y2),
@@ -238,7 +317,6 @@ def create_calendar_image(year: int, month: int):
         width=3
     )
 
-    # 안쪽 테두리
     draw.rounded_rectangle(
         (card_x1 + 12, card_y1 + 12, card_x2 - 12, card_y2 - 12),
         radius=24,
@@ -246,7 +324,6 @@ def create_calendar_image(year: int, month: int):
         width=2
     )
 
-    # 제목
     title = f"{year}년 {month:02d}월"
     bbox = draw.textbbox((0, 0), title, font=title_font)
     title_w = bbox[2] - bbox[0]
@@ -257,7 +334,6 @@ def create_calendar_image(year: int, month: int):
         font=title_font
     )
 
-    # 요일
     days = ["월", "화", "수", "목", "금", "토", "일"]
 
     grid_left = 105
@@ -290,7 +366,6 @@ def create_calendar_image(year: int, month: int):
     now = datetime.now()
     is_current_month = (now.year == year and now.month == month)
 
-    # 날짜 셀
     for row_idx, week in enumerate(month_days):
         for col_idx, day_num in enumerate(week):
             x1 = grid_left + col_idx * (cell_w + gap_x)
@@ -315,7 +390,6 @@ def create_calendar_image(year: int, month: int):
             elif col_idx == 6:
                 day_color = sun_red
 
-            # 오늘 강조
             if is_current_month and day_num == now.day:
                 draw.rounded_rectangle(
                     (x1, y1, x2, y2),
@@ -353,7 +427,6 @@ def create_calendar_image(year: int, month: int):
                     font=schedule_font
                 )
 
-    # 하단 오늘 일정 박스
     section_x1, section_y1, section_x2, section_y2 = 95, 1040, 1005, 1170
     draw.rounded_rectangle(
         (section_x1, section_y1, section_x2, section_y2),
@@ -405,22 +478,28 @@ def create_calendar_image(year: int, month: int):
 # =========================
 # 도움말 UI
 # =========================
-class HelpButton(discord.ui.Button):
+class HelpView(discord.ui.View):
     def __init__(self):
-        super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
+        super().__init__(timeout=120)
 
-    async def callback(self, interaction: discord.Interaction):
+    @discord.ui.button(label="🎵 노래", style=discord.ButtonStyle.primary)
+    async def music_help(self, interaction: discord.Interaction, button: discord.ui.Button):
         text = (
-            "📌 명령어 목록\n\n"
-            "🎵 노래 기능\n"
+            "🎵 노래 명령어\n\n"
             "!입장\n"
             "!퇴장\n"
             "!재생 노래이름\n"
             "!정지\n"
             "!일시정지\n"
             "!다시재생\n"
-            "!가사 노래이름\n\n"
-            "📅 일정 기능\n"
+            "!가사 노래이름"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @discord.ui.button(label="📅 일정", style=discord.ButtonStyle.success)
+    async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        text = (
+            "📅 일정 명령어\n\n"
             "!캘린더\n"
             "!캘린더 2026 03\n"
             "!일정추가 날짜 시간 내용\n"
@@ -428,6 +507,18 @@ class HelpButton(discord.ui.Button):
             "!일정목록"
         )
         await interaction.response.send_message(text, ephemeral=True)
+
+
+class HelpButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "보고 싶은 기능을 골라줘",
+            view=HelpView(),
+            ephemeral=True
+        )
 
 
 # =========================
@@ -469,6 +560,7 @@ class ColorButton(discord.ui.Button):
         view.add_item(ColorSelect())
         await interaction.response.send_message("색을 보고 골라줘", view=view, ephemeral=True)
 
+
 # =========================
 # 모달 UI
 # =========================
@@ -486,6 +578,7 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
             "datetime": f"{self.date.value} {self.time_input.value}",
             "text": self.text.value,
             "name": user_name,
+            "user_id": interaction.user.id,
             "color": color,
             "alert_enabled": False,
             "alert_10min": False,
@@ -493,14 +586,6 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
         })
         save_schedule()
         await interaction.response.send_message("✅ 일정 등록 완료\n새로 !캘린더 입력하면 반영돼", ephemeral=True)
-
-
-class ScheduleAddButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="일정등록", style=discord.ButtonStyle.success, row=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(AddScheduleModal())
 
 
 class ScheduleSelect(discord.ui.Select):
@@ -573,7 +658,6 @@ class CalendarView(discord.ui.View):
         self.year = year
         self.month = month
 
-        # 1줄
         self.add_item(ColorButton())
         self.add_item(HelpButton())
 
@@ -643,17 +727,23 @@ class CalendarView(discord.ui.View):
             ephemeral=True
         )
 
+
 # =========================
 # 이벤트
 # =========================
 @bot.event
 async def on_ready():
+    global schedule_task_started
     print(f"로그인 완료: {bot.user}")
 
     try:
         load_schedule()
         load_colors()
-        bot.loop.create_task(check_schedule())
+
+        if not schedule_task_started:
+            bot.loop.create_task(check_schedule())
+            schedule_task_started = True
+
     except Exception as e:
         print(f"초기화 오류: {e}")
 
@@ -687,6 +777,8 @@ async def join(ctx):
 @bot.command(name="퇴장")
 async def leave(ctx):
     if ctx.voice_client:
+        guild_id = ctx.guild.id
+        music_queues[guild_id] = []
         await ctx.voice_client.disconnect()
         await ctx.send("👋 퇴장 완료")
     else:
@@ -702,50 +794,45 @@ async def play(ctx, *, query: str):
     if ctx.voice_client is None:
         await ctx.author.voice.channel.connect()
 
-    if ctx.voice_client.is_playing():
-        ctx.voice_client.stop()
+    guild_id = ctx.guild.id
+    queue = get_guild_queue(guild_id)
+    queue.append((ctx, query))
 
-    try:
-        player = await YTDLSource.from_query(query)
-        ctx.voice_client.play(player)
-        await ctx.send(f"🎵 재생 중: **{player.title}**")
-    except Exception as e:
-        await ctx.send(f"오류 발생: {e}")
+    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+        await ctx.send(f"🎶 대기열 추가됨: {query}")
+    else:
+        await play_next(guild_id)
 
 
 @bot.command(name="정지")
 async def stop(ctx):
+    guild_id = ctx.guild.id
+    music_queues[guild_id] = []
+
     if ctx.voice_client:
         ctx.voice_client.stop()
         await ctx.send("⏹️ 정지 완료")
+    else:
+        await ctx.send("음성 채널에 없음")
 
 
 @bot.command(name="일시정지")
 async def pause(ctx):
-    if ctx.voice_client:
+    if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.pause()
         await ctx.send("⏸️ 일시정지")
+    else:
+        await ctx.send("현재 재생 중인 노래가 없어")
 
 
 @bot.command(name="다시재생")
 async def resume(ctx):
-    if ctx.voice_client:
+    if ctx.voice_client and ctx.voice_client.is_paused():
         ctx.voice_client.resume()
         await ctx.send("▶️ 다시 재생")
+    else:
+        await ctx.send("일시정지된 노래가 없어")
 
-@bot.command(name="노래도움말")
-async def music_help(ctx):
-    text = (
-        "🎵 **노래 기능 도움말**\n\n"
-        "`!입장` : 내가 들어간 음성 채널로 봇 입장\n"
-        "`!퇴장` : 봇이 음성 채널에서 나감\n"
-        "`!재생 노래이름` : 노래 검색 후 재생\n"
-        "`!정지` : 현재 재생 중인 노래 정지\n"
-        "`!일시정지` : 노래 일시정지\n"
-        "`!다시재생` : 일시정지한 노래 다시 재생\n"
-        "`!가사 노래이름` : 노래 가사 보기"
-    )
-    await ctx.send(text)
 
 # =========================
 # 가사 기능
@@ -776,9 +863,7 @@ async def lyrics(ctx, *, song: str = None):
 # =========================
 @bot.command(name="도움말")
 async def help_command(ctx):
-    view = discord.ui.View()
-    view.add_item(HelpButton())
-    await ctx.send("아래 버튼 누르면 명령어 목록 보여줄게.", view=view)
+    await ctx.send("보고 싶은 기능을 골라줘", view=HelpView())
 
 
 # =========================
@@ -794,6 +879,7 @@ async def add_schedule_cmd(ctx, date, time_input, *, text):
         "datetime": f"{date} {time_input}",
         "text": text,
         "name": user_name,
+        "user_id": ctx.author.id,
         "color": color,
         "alert_enabled": False,
         "alert_10min": False,
