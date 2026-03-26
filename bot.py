@@ -621,6 +621,33 @@ class HelpButton(discord.ui.Button):
             ephemeral=True
         )
 
+class ScheduleListButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="📋 일정리스트",
+            style=discord.ButtonStyle.secondary,
+            row=0
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not schedule:
+            await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
+            return
+
+        lines = []
+        for i, item in enumerate(schedule, start=1):
+            alert_text = "🔔" if item.get("alert_enabled") else "—"
+            lines.append(
+                f"{i}. {item['datetime']} | {item['text']} | {item.get('name', '사용자')} | {alert_text}"
+            )
+
+        text = "\n".join(lines)
+        chunks = split_text(text, 1800)
+
+        await interaction.response.send_message(f"```{chunks[0]}```", ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(f"```{chunk}```", ephemeral=True)
+
 
 # =========================
 # 색상 UI
@@ -850,6 +877,7 @@ class CalendarView(discord.ui.View):
 
         self.add_item(ColorButton())
         self.add_item(HelpButton())
+        self.add_item(ScheduleListButton())
 
     @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
     async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
