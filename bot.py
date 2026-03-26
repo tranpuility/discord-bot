@@ -664,37 +664,45 @@ class CalendarView(discord.ui.View):
         self.add_item(HelpButton())
 
     @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
-    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.month -= 1
-        if self.month < 1:
-            self.month = 12
-            self.year -= 1
+async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+    await interaction.response.defer()
 
-        file = create_calendar_image(self.year, self.month)
-        await interaction.response.edit_message(
-            attachments=[discord.File(file)],
-            view=self
-        )
+    self.month -= 1
+    if self.month < 1:
+        self.month = 12
+        self.year -= 1
 
-    @discord.ui.button(label="다음달 ▶", style=discord.ButtonStyle.secondary, row=0)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.month += 1
-        if self.month > 12:
-            self.month = 1
-            self.year += 1
+    file = create_calendar_image(self.year, self.month)
+    await interaction.message.edit(
+        attachments=[discord.File(file)],
+        view=self
+    )
 
-        file = create_calendar_image(self.year, self.month)
-        await interaction.response.edit_message(
-            attachments=[discord.File(file)],
-            view=self
-        )
+@discord.ui.button(label="다음달 ▶", style=discord.ButtonStyle.secondary, row=0)
+async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+    await interaction.response.defer()
+
+    self.month += 1
+    if self.month > 12:
+        self.month = 1
+        self.year += 1
+
+    file = create_calendar_image(self.year, self.month)
+    await interaction.message.edit(
+        attachments=[discord.File(file)],
+        view=self
+    )
 
     @discord.ui.button(label="일정등록", style=discord.ButtonStyle.success, row=1)
-    async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    try:
         await interaction.response.send_modal(AddScheduleModal())
+    except Exception as e:
+        print(f"일정등록 버튼 오류: {e}")
 
     @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
-    async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    try:
         if not schedule:
             await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
             return
@@ -704,9 +712,12 @@ class CalendarView(discord.ui.View):
             view=ScheduleSelectView("delete"),
             ephemeral=True
         )
+    except Exception as e:
+        print(f"일정삭제 버튼 오류: {e}")
 
     @discord.ui.button(label="알림등록", style=discord.ButtonStyle.primary, row=1)
-    async def add_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+async def add_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    try:
         if not schedule:
             await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
             return
@@ -716,9 +727,12 @@ class CalendarView(discord.ui.View):
             view=ScheduleSelectView("add_alert"),
             ephemeral=True
         )
+    except Exception as e:
+        print(f"알림등록 버튼 오류: {e}")
 
     @discord.ui.button(label="알림삭제", style=discord.ButtonStyle.secondary, row=1)
-    async def delete_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+async def delete_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    try:
         if not schedule:
             await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
             return
@@ -728,6 +742,8 @@ class CalendarView(discord.ui.View):
             view=ScheduleSelectView("delete_alert"),
             ephemeral=True
         )
+    except Exception as e:
+        print(f"알림삭제 버튼 오류: {e}")
 
 
 # =========================
