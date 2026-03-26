@@ -945,3 +945,5 @@ async def list_schedule(ctx):
 # 실행
 # =========================
 bot.run(TOKEN)
+
+# redeploy
