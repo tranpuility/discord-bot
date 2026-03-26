@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 # =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RESTART_FILE = os.path.join(BASE_DIR, "restart_channel.json")
+RESTART_PROCESSING_FILE = os.path.join(BASE_DIR, "restart_channel.processing.json")
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 TOKEN = os.getenv("TOKEN")
@@ -75,16 +76,10 @@ FFMPEG_OPTIONS = {
 }
 
 YTDL_OPTIONS = {
-    "format": "bestaudio[ext=m4a]/bestaudio/best",
+    "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
-    "default_search": "ytsearch",
-    "source_address": "0.0.0.0",
-    "nocheckcertificate": True,
-    "ignoreerrors": True,
-    "geo_bypass": True,
-    "geo_bypass_country": "KR",
-    "extract_flat": False
+    "default_search": "ytsearch"
 }
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
@@ -203,7 +198,9 @@ def get_music_state(guild_id: int):
         music_states[guild_id] = {
             "current": None,
             "repeat": False,
-            "history": []
+            "history": [],
+            "last_query": None,
+            "last_voice_channel_id": None
         }
     return music_states[guild_id]
 
@@ -351,6 +348,9 @@ async def play_next(guild_id: int):
             "query": query,
             "url": player.webpage_url or player.original_url
         }
+        state["last_query"] = query
+        if ctx.voice_client and ctx.voice_client.channel:
+            state["last_voice_channel_id"] = ctx.voice_client.channel.id
 
         def after_play(error):
             if error:
@@ -1036,15 +1036,9 @@ async def on_message(message):
 @bot.command(name="재시동")
 @commands.is_owner()
 async def restart(ctx):
-    global RESTARTING
-
-    if RESTARTING:
-        return
-
-    RESTARTING = True
-
     restart_msg = await ctx.send("🔄 봇 재시작 중...")
 
+    # 채널 ID + 메시지 ID 저장
     try:
         with open(RESTART_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -1078,6 +1072,9 @@ async def join(ctx):
         else:
             await ctx.voice_client.move_to(channel)
 
+        state = get_music_state(ctx.guild.id)
+        state["last_voice_channel_id"] = channel.id
+
         await ctx.send(f"✅ {channel.name} 입장 완료")
 
     except Exception as e:
@@ -1091,6 +1088,8 @@ async def leave(ctx):
         music_queues[guild_id] = []
 
         state = get_music_state(guild_id)
+        if state.get("current") and state["current"].get("query"):
+            state["last_query"] = state["current"]["query"]
         state["current"] = None
         state["history"] = []
         state["repeat"] = False
@@ -1102,17 +1101,31 @@ async def leave(ctx):
 
 
 @bot.command(name="재생")
-async def play(ctx, *, query: str):
-    if ctx.author.voice is None:
-        await ctx.send("음성 채널 먼저 들어가줘")
-        return
+async def play(ctx, *, query: str = None):
+    guild_id = ctx.guild.id
+    state = get_music_state(guild_id)
+
+    if query is None:
+        if state.get("current") and state["current"].get("query"):
+            query = state["current"]["query"]
+        elif state.get("last_query"):
+            query = state["last_query"]
+        else:
+            await ctx.send("재생할 노래를 먼저 입력해줘")
+            return
 
     if ctx.voice_client is None:
+        if ctx.author.voice is None:
+            await ctx.send("음성 채널 먼저 들어가줘")
+            return
         await ctx.author.voice.channel.connect()
+        state["last_voice_channel_id"] = ctx.author.voice.channel.id
+    elif ctx.voice_client.channel:
+        state["last_voice_channel_id"] = ctx.voice_client.channel.id
 
-    guild_id = ctx.guild.id
     queue = get_guild_queue(guild_id)
     queue.append((ctx, query))
+    state["last_query"] = query
 
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
         await ctx.send(f"🎶 대기열 추가됨: {query}", view=MusicView(ctx))
@@ -1126,6 +1139,8 @@ async def stop(ctx):
     music_queues[guild_id] = []
 
     state = get_music_state(guild_id)
+    if state.get("current") and state["current"].get("query"):
+        state["last_query"] = state["current"]["query"]
     state["current"] = None
 
     if ctx.voice_client:
