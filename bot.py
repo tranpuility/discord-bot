@@ -85,7 +85,7 @@ DEFAULT_COLOR = PASTEL_COLORS["pastel_blue"]["rgb"]
 # =========================
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn"
+    "options": "-vn -loglevel panic -bufsize 64k"
 }
 
 
@@ -145,11 +145,11 @@ class QuietYTDLPLogger:
 
 
 YTDL_OPTIONS = {
-    "format": "bestaudio[ext=m4a]/bestaudio/best",
+    "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "ytsearch1",
+    "default_search": "ytsearch5",
     "skip_download": True,
     "retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
     "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
@@ -467,7 +467,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     continue
 
                 try:
-                    source = discord.FFmpegPCMAudio(audio_url, **FFMPEG_OPTIONS)
+                    source = discord.FFmpegPCMAudio(audio_url, executable="ffmpeg", **FFMPEG_OPTIONS)
                     return cls(source, data=current_data)
                 except Exception as e:
                     last_error = e
@@ -1774,6 +1774,27 @@ async def play(ctx, *, query: str = None):
 
         await ctx.send(f"📃 플레이리스트 추가 완료: {len(added_queries)}곡", view=MusicView(ctx))
 
+        if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+            await play_next(guild_id)
+        return
+
+    if is_youtube_playlist_url(query):
+        try:
+            playlist_entries = await extract_playlist_entries(query)
+        except Exception as e:
+            await ctx.send(f"❌ 플레이리스트를 불러오지 못했어: {sanitize_music_error(e)}")
+            return
+
+        if not playlist_entries:
+            await ctx.send("플레이리스트 곡을 찾지 못했어")
+            return
+
+        for title, url in playlist_entries:
+            queue.append((ctx, url))
+        state["last_query"] = playlist_entries[0][1]
+        save_music_data()
+
+        await ctx.send(f"📃 플레이리스트 {len(playlist_entries)}곡을 대기열에 추가했어", view=MusicView(ctx))
         if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
             await play_next(guild_id)
         return
