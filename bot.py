@@ -192,6 +192,46 @@ def sanitize_music_error(error: Exception) -> str:
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
 
 
+def normalize_search_text(text: str) -> str:
+    if not text:
+        return ""
+
+    lowered = text.lower().strip()
+    replacements = {
+        "official video": " ",
+        "official mv": " ",
+        "official music video": " ",
+        "official audio": " ",
+        "audio": " ",
+        "lyrics video": " ",
+        "lyric video": " ",
+        "lyrics": " ",
+        "live clip": " ",
+        "live": " ",
+        "shorts": " ",
+        "full ver": " ",
+        "full version": " ",
+        "topic": " ",
+        "hd": " ",
+        "4k": " ",
+        "8k": " ",
+        "[": " ",
+        "]": " ",
+        "(": " ",
+        ")": " ",
+        "-": " ",
+        "_": " ",
+        "|": " ",
+        "/": " ",
+        ",": " ",
+        ".": " ",
+        ":": " ",
+    }
+    for a, b in replacements.items():
+        lowered = lowered.replace(a, b)
+    return " ".join(lowered.split())
+
+
 def build_query_candidates(query: str):
     candidates = []
 
@@ -200,20 +240,98 @@ def build_query_candidates(query: str):
         if value and value not in candidates:
             candidates.append(value)
 
-    add(query)
-    add(f"ytsearch3:{query}")
+    base_query = query.strip()
+    add(base_query)
+    add(f"ytsearch5:{base_query}")
+    add(f"ytsearch10:{base_query}")
 
-    artist, title = extract_artist_title(query)
+    artist, title = extract_artist_title(base_query)
     if artist and title:
-        add(f"ytsearch3:{artist} {title} official audio")
-        add(f"ytsearch3:{artist} {title} topic")
-        add(f"ytsearch3:{artist} {title} lyrics")
+        pair = f"{artist} {title}".strip()
+        add(f"ytsearch10:{pair} official audio")
+        add(f"ytsearch10:{pair} topic")
+        add(f"ytsearch10:{pair} audio")
+        add(f"ytsearch10:{pair} lyrics")
+        add(f"ytsearch10:{pair} live")
     else:
-        add(f"ytsearch3:{query} official audio")
-        add(f"ytsearch3:{query} topic")
-        add(f"ytsearch3:{query} lyrics")
+        add(f"ytsearch10:{base_query} official audio")
+        add(f"ytsearch10:{base_query} topic")
+        add(f"ytsearch10:{base_query} audio")
+        add(f"ytsearch10:{base_query} lyrics")
+        add(f"ytsearch10:{base_query} live")
 
-    return candidates[:5]
+    return candidates[:8]
+
+
+def score_entry_for_query(entry: dict, query: str) -> int:
+    score = 0
+
+    target = normalize_search_text(query)
+    title = normalize_search_text(entry.get("title") or "")
+    uploader = normalize_search_text(entry.get("uploader") or entry.get("channel") or "")
+    description = normalize_search_text(entry.get("description") or "")
+
+    query_tokens = [token for token in target.split() if token]
+    title_tokens = set(title.split())
+    description_tokens = set(description.split())
+
+    for token in query_tokens:
+        if token in title_tokens:
+            score += 12
+        elif token in description_tokens:
+            score += 4
+
+    if target and target in title:
+        score += 35
+    if target and target in f"{uploader} {title}":
+        score += 10
+
+    raw_title = (entry.get("title") or "").lower()
+    raw_uploader = (entry.get("uploader") or entry.get("channel") or "").lower()
+
+    positive_keywords = {
+        "official audio": 18,
+        "audio": 8,
+        "topic": 14,
+        "provided to youtube": 12,
+        "lyrics": 5,
+    }
+    for keyword, value in positive_keywords.items():
+        if keyword in raw_title or keyword in raw_uploader:
+            score += value
+
+    negative_keywords = {
+        "live": -18,
+        "cover": -22,
+        "reaction": -30,
+        "sped up": -20,
+        "slowed": -20,
+        "reverb": -20,
+        "remix": -15,
+        "mashup": -24,
+        "teaser": -18,
+        "preview": -14,
+        "shorts": -40,
+        "instrumental": -16,
+    }
+    for keyword, value in negative_keywords.items():
+        if keyword in raw_title:
+            score += value
+
+    duration = entry.get("duration")
+    if isinstance(duration, (int, float)):
+        if 90 <= duration <= 420:
+            score += 12
+        elif duration < 45:
+            score -= 35
+        elif duration > 900:
+            score -= 15
+
+    availability = (entry.get("availability") or "").lower()
+    if availability in {"private", "premium_only", "subscriber_only"}:
+        score -= 100
+
+    return score
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -235,7 +353,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if not data:
                 return []
             if isinstance(data, dict) and "entries" in data:
-                return [entry for entry in (data.get("entries") or []) if entry]
+                entries = [entry for entry in (data.get("entries") or []) if entry]
+                entries.sort(key=lambda entry: score_entry_for_query(entry, query), reverse=True)
+                return entries
             return [data]
 
         blocked_error_seen = False
@@ -254,7 +374,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if not entries:
                 continue
 
-            for entry in entries[:3]:
+            for entry in entries[:7]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -263,6 +383,11 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     if webpage_url:
                         try:
                             current_data = await loop.run_in_executor(None, lambda u=webpage_url: extract_once(u))
+                            if isinstance(current_data, dict) and "entries" in current_data:
+                                nested_entries = [x for x in (current_data.get("entries") or []) if x]
+                                if nested_entries:
+                                    nested_entries.sort(key=lambda entry: score_entry_for_query(entry, query), reverse=True)
+                                    current_data = nested_entries[0]
                             audio_url = current_data.get("url")
                         except Exception as e:
                             last_error = e
@@ -286,7 +411,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             raise ValueError("유튜브 요청 제한 때문에 재생이 막혔어. cookies.txt를 넣은 뒤 다시 시도해줘.")
         if last_error is not None:
             raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
-        raise ValueError("검색 결과가 없습니다.")
+        raise ValueError("검색 결과를 찾지 못했어. 가수명이나 곡명을 조금 더 정확하게 입력해줘.")
 
 
 # =========================
@@ -333,6 +458,8 @@ def save_music_data():
             current_query = state["current"]["query"]
 
         queue_queries = [query for _, query in queue if isinstance(query, str)]
+        if state.get("current") and state["current"].get("query") and queue_queries and queue_queries[0] == state["current"]["query"]:
+            queue_queries = queue_queries[1:]
 
         data[str(guild_id)] = {
             "last_query": state.get("last_query") or current_query,
@@ -991,6 +1118,7 @@ class MusicDeleteSelect(discord.ui.Select):
             return
 
         _, removed_query = queue.pop(idx)
+        save_music_data()
         await interaction.response.send_message(f"🗑️ 대기열에서 삭제 완료: {removed_query}", ephemeral=True)
 
 
@@ -1146,6 +1274,7 @@ class MusicView(discord.ui.View):
         guild_id = self.ctx.guild.id
         state = get_music_state(guild_id)
         state["repeat"] = not state["repeat"]
+        save_music_data()
         text = "🔁 반복 켜짐" if state["repeat"] else "➡️ 반복 꺼짐"
         await interaction.response.send_message(text, ephemeral=True)
 
