@@ -7,8 +7,10 @@ import asyncio
 import aiohttp
 import yt_dlp
 import calendar
+import nacl  # PyNaCl import check
 import uuid
 from datetime import datetime, timedelta
+from PIL import Image, ImageDraw, ImageFont
 
 from dotenv import load_dotenv
 
@@ -30,32 +32,9 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
-YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
-YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "true", "yes", "on")
-
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
-
-MUSIC_HELP_TEXT = (
-    "🎵 노래 명령어\n\n"
-    "!입장\n"
-    "!퇴장\n"
-    "!재생 노래이름\n"
-    "!정지\n"
-    "!일시정지\n"
-    "!다시재생\n"
-    "!가사 가수 - 제목\n"
-    "!노래리스트"
-)
-SCHEDULE_HELP_TEXT = (
-    "📅 일정 명령어\n\n"
-    "!캘린더\n"
-    "!캘린더 2026 03\n"
-    "!일정추가 날짜 시간 내용\n"
-    "!일정삭제 번호\n"
-    "!일정목록"
-)
 
 # =========================
 # 기본 설정
@@ -102,27 +81,8 @@ FFMPEG_OPTIONS = {
     "options": "-vn"
 }
 
-
-def resolve_cookie_file():
-    if not YTDLP_USE_COOKIES:
-        return None
-
-    candidates = [
-        YTDLP_COOKIE_FILE,
-        os.path.join(DATA_DIR, "cookies.txt"),
-        os.path.join(BASE_DIR, "cookies.txt"),
-    ]
-
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return path
-
-    return None
-
-
 YTDL_OPTIONS = {
     "format": "bestaudio[ext=m4a]/bestaudio/best",
-    "format_sort": ["audio"],
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -145,11 +105,7 @@ YTDL_OPTIONS = {
 
 
 def create_ytdl():
-    options = dict(YTDL_OPTIONS)
-    cookie_file = resolve_cookie_file()
-    if cookie_file:
-        options["cookiefile"] = cookie_file
-    return yt_dlp.YoutubeDL(options)
+    return yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 
 def is_blocked_music_error(error_text: str) -> bool:
@@ -167,9 +123,7 @@ def is_blocked_music_error(error_text: str) -> bool:
 def sanitize_music_error(error: Exception) -> str:
     error_text = str(error)
     if is_blocked_music_error(error_text):
-        if resolve_cookie_file():
-            return "❌ 유튜브 요청 제한에 걸렸어... 잠시 후 다시 시도해줘!"
-        return "❌ 유튜브 요청 제한에 걸렸어. cookies.txt를 넣어주면 훨씬 안정적으로 재생할 수 있어!"
+        return "❌ 유튜브 요청 제한에 걸렸어... 잠시 후 다시 시도해줘!"
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
 
 
@@ -262,9 +216,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     continue
 
         if blocked_error_seen:
-            if resolve_cookie_file():
-                raise ValueError("유튜브 요청이 잠시 많아서 재생이 어려워. 잠깐 뒤에 다시 시도해줘.")
-            raise ValueError("유튜브 요청 제한 때문에 재생이 막혔어. cookies.txt를 넣은 뒤 다시 시도해줘.")
+            raise ValueError("유튜브 요청이 잠시 많아서 재생이 어려워. 잠깐 뒤에 다시 시도해줘.")
         if last_error is not None:
             raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
         raise ValueError("검색 결과가 없습니다.")
@@ -360,7 +312,6 @@ def load_music_data():
 # 공통 유틸
 # =========================
 def get_font(size: int):
-    from PIL import ImageFont
     if os.path.exists(FONT_FILE):
         return ImageFont.truetype(FONT_FILE, size)
     return ImageFont.load_default()
@@ -604,7 +555,6 @@ async def play_next(guild_id: int):
 # 캘린더 이미지 생성
 # =========================
 def create_calendar_image(year: int, month: int):
-    from PIL import Image, ImageDraw
     width, height = 1100, 1300
     image = Image.new("RGB", (width, height), (20, 20, 24))
     draw = ImageDraw.Draw(image)
@@ -733,11 +683,38 @@ class HelpView(discord.ui.View):
 
     @discord.ui.button(label="🎵 노래", style=discord.ButtonStyle.primary)
     async def music_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(MUSIC_HELP_TEXT, ephemeral=True)
+        text = (
+            "🎵 노래 명령어\n\n"
+            "!입장\n"
+            "!퇴장\n"
+            "!재생 노래이름\n"
+            "!정지\n"
+            "!일시정지\n"
+            "!다시재생\n"
+            "!가사 가수 - 제목\n"
+            "!노래리스트"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
 
     @discord.ui.button(label="📅 일정", style=discord.ButtonStyle.success)
     async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(SCHEDULE_HELP_TEXT, ephemeral=True)
+        text = (
+            "📅 일정 명령어\n\n"
+            "!캘린더\n"
+            "!캘린더 2026 03\n"
+            "!일정추가 날짜 시간 내용\n"
+            "!일정삭제 번호\n"
+            "!일정목록"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
+
+
+class HelpButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message("보고 싶은 기능을 골라줘", view=HelpView(), ephemeral=True)
 
 
 class ScheduleHelpButton(discord.ui.Button):
@@ -745,7 +722,15 @@ class ScheduleHelpButton(discord.ui.Button):
         super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message(SCHEDULE_HELP_TEXT, ephemeral=True)
+        text = (
+            "📅 일정 명령어\n\n"
+            "!캘린더\n"
+            "!캘린더 2026 03\n"
+            "!일정추가 날짜 시간 내용\n"
+            "!일정삭제 번호\n"
+            "!일정목록"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
 
 
 class ScheduleListButton(discord.ui.Button):
@@ -934,7 +919,6 @@ class MusicDeleteSelect(discord.ui.Select):
             return
 
         _, removed_query = queue.pop(idx)
-        save_music_data()
         await interaction.response.send_message(f"🗑️ 대기열에서 삭제 완료: {removed_query}", ephemeral=True)
 
 
@@ -1079,8 +1063,6 @@ class MusicView(discord.ui.View):
         state = get_music_state(guild_id)
         state["current"] = None
 
-        save_music_data()
-
         if self.ctx.voice_client:
             self.ctx.voice_client.stop()
             await interaction.response.send_message("⏹️ 정지 완료", ephemeral=True)
@@ -1093,7 +1075,6 @@ class MusicView(discord.ui.View):
         state = get_music_state(guild_id)
         state["repeat"] = not state["repeat"]
         text = "🔁 반복 켜짐" if state["repeat"] else "➡️ 반복 꺼짐"
-        save_music_data()
         await interaction.response.send_message(text, ephemeral=True)
 
     @discord.ui.button(label="📜 노래리스트", style=discord.ButtonStyle.secondary, row=1)
@@ -1161,7 +1142,18 @@ class MusicView(discord.ui.View):
 
     @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
     async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(MUSIC_HELP_TEXT, ephemeral=True)
+        text = (
+            "🎵 노래 명령어\n\n"
+            "!입장\n"
+            "!퇴장\n"
+            "!재생 노래이름\n"
+            "!정지\n"
+            "!일시정지\n"
+            "!다시재생\n"
+            "!노래리스트\n"
+            "!가사 가수 - 제목"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
 
     @discord.ui.button(label="➕ 노래추가", style=discord.ButtonStyle.success, row=1)
     async def add_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1191,12 +1183,6 @@ async def on_ready():
         load_schedule()
         load_colors()
         load_music_data()
-
-        cookie_file = resolve_cookie_file()
-        if cookie_file:
-            print(f"yt-dlp cookies 적용됨: {cookie_file}")
-        else:
-            print("yt-dlp cookies 미적용: cookies.txt 없으면 일부 유튜브 재생이 막힐 수 있음")
 
         # 재시동 완료 메시지 처리
         if os.path.exists(RESTART_FILE):
@@ -1512,15 +1498,6 @@ async def lyrics(ctx, *, song: str = None):
 @bot.command(name="도움말")
 async def help_command(ctx):
     await ctx.send("보고 싶은 기능을 골라줘", view=HelpView())
-
-
-@bot.command(name="쿠키상태")
-async def cookie_status(ctx):
-    cookie_file = resolve_cookie_file()
-    if cookie_file:
-        await ctx.send(f"✅ cookies 적용 중\n경로: `{cookie_file}`")
-    else:
-        await ctx.send("⚠️ cookies.txt가 없어. 유튜브 차단이 걸리면 재생이 안 될 수 있어.")
 
 
 # =========================
