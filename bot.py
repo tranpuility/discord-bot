@@ -475,16 +475,13 @@ class CalendarView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"로그인 완료: {bot.user}")
-    load_schedule()
-    load_colors()
-    bot.loop.create_task(check_schedule())
 
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    await bot.process_commands(message)
+    try:
+        load_schedule()
+        load_colors()
+        bot.loop.create_task(check_schedule())
+    except Exception as e:
+        print(f"초기화 오류: {e}")
 
 
 # =========================
