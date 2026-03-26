@@ -7,6 +7,7 @@ import aiohttp
 import yt_dlp
 import calendar
 import nacl
+import uuid
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
@@ -25,7 +26,6 @@ if not TOKEN:
 SCHEDULE_FILE = os.path.join(BASE_DIR, "schedule.json")
 COLORS_FILE = os.path.join(BASE_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
-CALENDAR_OUTPUT_FILE = os.path.join(BASE_DIR, "calendar_output.png")
 
 # =========================
 # 기본 설정
@@ -71,13 +71,14 @@ FFMPEG_OPTIONS = {
 }
 
 YTDL_OPTIONS = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "default_search": "ytsearch",
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "web"]
+            "player_client": ["android", "web"],
+            "skip": ["dash", "hls"]
         }
     }
 }
@@ -100,7 +101,10 @@ class YTDLSource(discord.PCMVolumeTransformer):
         )
 
         if "entries" in data:
-            data = data["entries"][0]
+            entries = data.get("entries")
+            if not entries:
+                raise ValueError("검색 결과가 없습니다.")
+            data = entries[0]
 
         source = discord.FFmpegPCMAudio(data["url"], **FFMPEG_OPTIONS)
         return cls(source, data=data)
@@ -473,8 +477,9 @@ def create_calendar_image(year: int, month: int):
             font=bottom_text_font
         )
 
-    image.save(CALENDAR_OUTPUT_FILE)
-    return CALENDAR_OUTPUT_FILE
+    output_file = os.path.join(BASE_DIR, f"calendar_{year}_{month}_{uuid.uuid4().hex[:8]}.png")
+    image.save(output_file)
+    return output_file
 
 
 # =========================
@@ -513,7 +518,11 @@ class HelpView(discord.ui.View):
 
 class HelpButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
+        super().__init__(
+            label="📖 도움말",
+            style=discord.ButtonStyle.primary,
+            row=0
+        )
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_message(
@@ -555,7 +564,11 @@ class ColorSelect(discord.ui.Select):
 
 class ColorButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🎨 색 선택", style=discord.ButtonStyle.secondary, row=0)
+        super().__init__(
+            label="🎨 색 선택",
+            style=discord.ButtonStyle.secondary,
+            row=0
+        )
 
     async def callback(self, interaction: discord.Interaction):
         view = discord.ui.View()
@@ -656,7 +669,7 @@ class ScheduleSelectView(discord.ui.View):
 # =========================
 class CalendarView(discord.ui.View):
     def __init__(self, year, month):
-        super().__init__(timeout=None)
+        super().__init__(timeout=3600)
         self.year = year
         self.month = month
 
@@ -664,86 +677,86 @@ class CalendarView(discord.ui.View):
         self.add_item(HelpButton())
 
     @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
-async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-    await interaction.response.defer()
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
 
-    self.month -= 1
-    if self.month < 1:
-        self.month = 12
-        self.year -= 1
+        self.month -= 1
+        if self.month < 1:
+            self.month = 12
+            self.year -= 1
 
-    file = create_calendar_image(self.year, self.month)
-    await interaction.message.edit(
-        attachments=[discord.File(file)],
-        view=self
-    )
+        file_path = await asyncio.to_thread(create_calendar_image, self.year, self.month)
+        await interaction.message.edit(
+            attachments=[discord.File(file_path)],
+            view=self
+        )
 
-@discord.ui.button(label="다음달 ▶", style=discord.ButtonStyle.secondary, row=0)
-async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-    await interaction.response.defer()
+    @discord.ui.button(label="다음달 ▶", style=discord.ButtonStyle.secondary, row=0)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
 
-    self.month += 1
-    if self.month > 12:
-        self.month = 1
-        self.year += 1
+        self.month += 1
+        if self.month > 12:
+            self.month = 1
+            self.year += 1
 
-    file = create_calendar_image(self.year, self.month)
-    await interaction.message.edit(
-        attachments=[discord.File(file)],
-        view=self
-    )
+        file_path = await asyncio.to_thread(create_calendar_image, self.year, self.month)
+        await interaction.message.edit(
+            attachments=[discord.File(file_path)],
+            view=self
+        )
 
     @discord.ui.button(label="일정등록", style=discord.ButtonStyle.success, row=1)
-async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-    try:
-        await interaction.response.send_modal(AddScheduleModal())
-    except Exception as e:
-        print(f"일정등록 버튼 오류: {e}")
+    async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.send_modal(AddScheduleModal())
+        except Exception as e:
+            print(f"일정등록 버튼 오류: {e}")
 
     @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
-async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-    try:
-        if not schedule:
-            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
-            return
+    async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if not schedule:
+                await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
+                return
 
-        await interaction.response.send_message(
-            "🗑️ 삭제할 일정을 골라줘",
-            view=ScheduleSelectView("delete"),
-            ephemeral=True
-        )
-    except Exception as e:
-        print(f"일정삭제 버튼 오류: {e}")
+            await interaction.response.send_message(
+                "🗑️ 삭제할 일정을 골라줘",
+                view=ScheduleSelectView("delete"),
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"일정삭제 버튼 오류: {e}")
 
     @discord.ui.button(label="알림등록", style=discord.ButtonStyle.primary, row=1)
-async def add_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-    try:
-        if not schedule:
-            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
-            return
+    async def add_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if not schedule:
+                await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
+                return
 
-        await interaction.response.send_message(
-            "🔔 알림 등록할 일정을 골라줘",
-            view=ScheduleSelectView("add_alert"),
-            ephemeral=True
-        )
-    except Exception as e:
-        print(f"알림등록 버튼 오류: {e}")
+            await interaction.response.send_message(
+                "🔔 알림 등록할 일정을 골라줘",
+                view=ScheduleSelectView("add_alert"),
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"알림등록 버튼 오류: {e}")
 
     @discord.ui.button(label="알림삭제", style=discord.ButtonStyle.secondary, row=1)
-async def delete_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-    try:
-        if not schedule:
-            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
-            return
+    async def delete_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if not schedule:
+                await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
+                return
 
-        await interaction.response.send_message(
-            "🔕 알림 삭제할 일정을 골라줘",
-            view=ScheduleSelectView("delete_alert"),
-            ephemeral=True
-        )
-    except Exception as e:
-        print(f"알림삭제 버튼 오류: {e}")
+            await interaction.response.send_message(
+                "🔕 알림 삭제할 일정을 골라줘",
+                view=ScheduleSelectView("delete_alert"),
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"알림삭제 버튼 오류: {e}")
 
 
 # =========================
@@ -929,7 +942,7 @@ async def show_calendar(ctx, year: int = None, month: int = None):
     year = year or now.year
     month = month or now.month
 
-    file_path = create_calendar_image(year, month)
+    file_path = await asyncio.to_thread(create_calendar_image, year, month)
     view = CalendarView(year, month)
     await ctx.send(file=discord.File(file_path), view=view)
 
