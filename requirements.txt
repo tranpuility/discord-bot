@@ -4,3 +4,4 @@ aiohttp
 yt-dlp
 Pillow
 PyNaCl==1.5.0
+ffmpeg-python
