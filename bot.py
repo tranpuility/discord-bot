@@ -349,29 +349,55 @@ async def extract_playlist_entries(query: str):
     return entries
 
 
-def build_query_candidates(query: str):
 
+def build_query_candidates(query: str):
     candidates = []
 
     def add(value: str):
-        value = value.strip()
+        value = (value or "").strip()
         if value and value not in candidates:
             candidates.append(value)
 
-    add(query)
-    add(f"ytsearch3:{query}")
-
+    normalized = normalize_song_text(query)
     artist, title = extract_artist_title(query)
-    if artist and title:
-        add(f"ytsearch3:{artist} {title} official audio")
-        add(f"ytsearch3:{artist} {title} topic")
-        add(f"ytsearch3:{artist} {title} lyrics")
-    else:
-        add(f"ytsearch3:{query} official audio")
-        add(f"ytsearch3:{query} topic")
-        add(f"ytsearch3:{query} lyrics")
 
-    return candidates[:5]
+    add(query)
+    add(f"ytsearch5:{query}")
+    add(f"ytsearch10:{query}")
+
+    if artist and title:
+        base = f"{artist} {title}".strip()
+        add(f"ytsearch5:{base}")
+        add(f"ytsearch5:{base} official audio")
+        add(f"ytsearch5:{base} topic")
+        add(f"ytsearch5:{base} lyrics")
+        add(f"ytsearch5:{artist} - {title}")
+        add(f"ytsearch10:{base}")
+    else:
+        add(f"ytsearch5:{query} official audio")
+        add(f"ytsearch5:{query} topic")
+        add(f"ytsearch5:{query} lyrics")
+        add(f"ytsearch10:{query} audio")
+
+    for guessed in guess_artist_song_candidates(query):
+        add(guessed)
+        add(f"ytsearch5:{guessed}")
+        add(f"ytsearch5:{guessed} official audio")
+
+    if normalized.endswith(" 노래"):
+        artist_only = normalized[:-3].strip()
+        for guessed in guess_artist_song_candidates(artist_only):
+            add(guessed)
+            add(f"ytsearch5:{guessed}")
+
+    # 최후 fallback
+    add(f"scsearch3:{query}")
+    if artist and title:
+        add(f"scsearch3:{artist} {title}")
+
+    return candidates[:20]
+
+
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -412,7 +438,16 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if not entries:
                 continue
 
-            for entry in entries[:3]:
+            # 검색 품질 점수화
+            scored_entries = []
+            for entry in entries[:10]:
+                if not entry:
+                    continue
+                score = score_entry_for_query(entry, query)
+                scored_entries.append((score, entry))
+            scored_entries.sort(key=lambda item: item[0], reverse=True)
+
+            for _, entry in scored_entries[:5]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -446,6 +481,55 @@ class YTDLSource(discord.PCMVolumeTransformer):
             raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
         raise ValueError("검색 결과가 없습니다.")
 
+
+
+
+def build_resolve_attempts(query: str):
+    attempts = []
+
+    def add(value: str):
+        value = (value or "").strip()
+        if value and value not in attempts:
+            attempts.append(value)
+
+    add(query)
+
+    artist, title = extract_artist_title(query)
+    if artist and title:
+        add(f"{artist} {title}")
+        add(f"{artist} {title} official audio")
+        add(f"{artist} {title} topic")
+    else:
+        add(f"{query} official audio")
+        add(f"{query} topic")
+        add(f"{query} lyrics")
+
+    for guessed in guess_artist_song_candidates(query):
+        add(guessed)
+
+    normalized = normalize_song_text(query)
+    if normalized.endswith(" 노래"):
+        artist_only = normalized[:-3].strip()
+        for guessed in guess_artist_song_candidates(artist_only):
+            add(guessed)
+
+    return attempts[:10]
+
+
+async def try_resolve_player_with_fallback(query: str):
+    attempted_queries = []
+
+    for candidate in build_resolve_attempts(query):
+        attempted_queries.append(candidate)
+        try:
+            player = await YTDLSource.from_query(candidate)
+            return player, attempted_queries
+        except Exception:
+            continue
+
+    # 마지막으로 원본 쿼리 에러를 그대로 올려서 안내문 유지
+    player = await YTDLSource.from_query(query)
+    return player, attempted_queries or [query]
 
 # =========================
 # 파일 저장 / 불러오기
@@ -1637,6 +1721,7 @@ async def leave(ctx):
         await ctx.send("음성 채널에 없음")
 
 
+
 @bot.command(name="재생")
 async def play(ctx, *, query: str = None):
     guild_id = ctx.guild.id
@@ -1667,6 +1752,31 @@ async def play(ctx, *, query: str = None):
         for restored_query in restored_queue:
             queue.append((ctx, restored_query))
         state["restored_queue"] = []
+
+    if is_youtube_playlist_url(query):
+        try:
+            playlist_entries = await extract_playlist_entries(query)
+        except Exception as e:
+            await ctx.send(f"❌ 플레이리스트를 불러오지 못했어: {sanitize_music_error(e)}")
+            return
+
+        if not playlist_entries:
+            await ctx.send("플레이리스트 안에서 재생할 곡을 찾지 못했어")
+            return
+
+        added_queries = []
+        for _, entry_url in playlist_entries:
+            queue.append((ctx, entry_url))
+            added_queries.append(entry_url)
+
+        state["last_query"] = query
+        save_music_data()
+
+        await ctx.send(f"📃 플레이리스트 추가 완료: {len(added_queries)}곡", view=MusicView(ctx))
+
+        if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+            await play_next(guild_id)
+        return
 
     queue.append((ctx, query))
     state["last_query"] = query
