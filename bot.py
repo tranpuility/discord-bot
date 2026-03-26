@@ -760,18 +760,29 @@ async def on_message(message):
 # =========================
 @bot.command(name="입장")
 async def join(ctx):
+    print("입장 명령어 실행됨")
+
     if ctx.author.voice is None:
+        print("사용자가 음성 채널에 없음")
         await ctx.send("먼저 음성 채널에 들어가 있어야 해.")
         return
 
     channel = ctx.author.voice.channel
+    print(f"입장 시도 채널: {channel.name}")
 
-    if ctx.voice_client is None:
-        await channel.connect()
-    else:
-        await ctx.voice_client.move_to(channel)
+    try:
+        if ctx.voice_client is None:
+            await channel.connect()
+            print("음성 채널 연결 성공")
+        else:
+            await ctx.voice_client.move_to(channel)
+            print("이미 연결된 상태라 이동")
 
-    await ctx.send(f"✅ {channel.name} 입장 완료")
+        await ctx.send(f"✅ {channel.name} 입장 완료")
+
+    except Exception as e:
+        print(f"입장 오류: {e}")
+        await ctx.send(f"❌ 입장 실패: {e}")
 
 
 @bot.command(name="퇴장")
