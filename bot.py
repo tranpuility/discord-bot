@@ -10,6 +10,7 @@ import calendar
 import nacl  # PyNaCl import check
 import uuid
 from datetime import datetime, timedelta
+from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
 
 from dotenv import load_dotenv
@@ -150,9 +151,9 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "default_search": "ytsearch1",
     "skip_download": True,
-    "retries": 10,
-    "fragment_retries": 10,
-    "socket_timeout": 20,
+    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
+    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
+    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "20")),
     "nocheckcertificate": True,
     "geo_bypass": True,
     "youtube_include_dash_manifest": False,
@@ -163,12 +164,14 @@ YTDL_OPTIONS = {
     },
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "ios", "web_creator", "mweb", "web"],
+            "player_client": ["android", "ios", "mweb"] if YTDLP_DISABLE_WEB_CLIENT else ["android", "ios", "mweb", "web_creator", "web"],
             "player_skip": ["webpage", "configs"]
         }
     },
     "logger": QuietYTDLPLogger(),
 }
+if YTDLP_FORCE_IPV4:
+    YTDL_OPTIONS["source_address"] = "0.0.0.0"
 
 
 def create_ytdl():
@@ -210,7 +213,144 @@ def sanitize_music_error(error: Exception) -> str:
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
 
 
+
+POPULAR_SONG_HINTS = {
+    "아이유": ["아이유 좋은날", "아이유 밤편지", "아이유 blueming", "아이유 라일락"],
+    "iu": ["IU Good Day", "IU Through the Night", "IU Blueming", "IU LILAC"],
+    "뉴진스": ["NewJeans Hype Boy", "NewJeans Ditto", "NewJeans Super Shy", "NewJeans Attention"],
+    "newjeans": ["NewJeans Hype Boy", "NewJeans Ditto", "NewJeans Super Shy", "NewJeans Attention"],
+    "아이브": ["IVE I AM", "IVE LOVE DIVE", "IVE After LIKE", "IVE 해야"],
+    "ive": ["IVE I AM", "IVE LOVE DIVE", "IVE After LIKE", "IVE 해야"],
+    "방탄소년단": ["BTS Dynamite", "BTS 봄날", "BTS Butter", "BTS 작은 것들을 위한 시"],
+    "bts": ["BTS Dynamite", "BTS Spring Day", "BTS Butter", "BTS Boy With Luv"],
+    "블랙핑크": ["BLACKPINK How You Like That", "BLACKPINK Pink Venom", "BLACKPINK Shut Down"],
+    "blackpink": ["BLACKPINK How You Like That", "BLACKPINK Pink Venom", "BLACKPINK Shut Down"],
+    "에스파": ["aespa Supernova", "aespa Drama", "aespa Next Level"],
+    "aespa": ["aespa Supernova", "aespa Drama", "aespa Next Level"],
+}
+
+NEGATIVE_TITLE_KEYWORDS = [
+    "cover", "karaoke", "mr", "inst", "instrumental", "reaction", "shorts",
+    "sped up", "speed up", "slowed", "reverb", "live clip", "teaser", "preview"
+]
+
+POSITIVE_TITLE_KEYWORDS = [
+    "official audio", "official", "audio", "topic", "lyrics", "mv", "music video"
+]
+
+
+def normalize_song_text(text_value: str) -> str:
+    return " ".join((text_value or "").strip().lower().split())
+
+
+def guess_artist_song_candidates(query: str):
+    normalized = normalize_song_text(query)
+    candidates = []
+
+    for artist_key, songs in POPULAR_SONG_HINTS.items():
+        if normalized == artist_key or normalized == f"{artist_key} 노래" or normalized == f"{artist_key} 노래 추천":
+            candidates.extend(songs)
+            break
+
+    if not candidates and normalized.endswith(" 노래"):
+        artist = normalized[:-3].strip()
+        for artist_key, songs in POPULAR_SONG_HINTS.items():
+            if artist == artist_key:
+                candidates.extend(songs)
+                break
+
+    unique = []
+    for item in candidates:
+        if item not in unique:
+            unique.append(item)
+    return unique[:4]
+
+
+def score_entry_for_query(entry: dict, query: str) -> int:
+    title = normalize_song_text(entry.get("title", ""))
+    uploader = normalize_song_text(entry.get("uploader", ""))
+    description = normalize_song_text(entry.get("description", ""))[:500]
+    query_norm = normalize_song_text(query)
+
+    score = 0
+    if query_norm and query_norm in title:
+        score += 10
+
+    artist, song_title = extract_artist_title(query)
+    if artist:
+        artist_norm = normalize_song_text(artist)
+        title_norm = normalize_song_text(song_title)
+        if artist_norm in title or artist_norm in uploader:
+            score += 12
+        if title_norm and title_norm in title:
+            score += 12
+
+    for word in POSITIVE_TITLE_KEYWORDS:
+        if word in title or word in description:
+            score += 4
+
+    for word in NEGATIVE_TITLE_KEYWORDS:
+        if word in title or word in description:
+            score -= 8
+
+    if "topic" in uploader:
+        score += 6
+
+    duration = entry.get("duration")
+    if isinstance(duration, (int, float)):
+        if 90 <= duration <= 420:
+            score += 3
+        elif duration < 45 or duration > 900:
+            score -= 6
+
+    return score
+
+
+def is_youtube_playlist_url(query: str) -> bool:
+    try:
+        parsed = urlparse(query.strip())
+        if parsed.netloc and ("youtube.com" in parsed.netloc or "youtu.be" in parsed.netloc):
+            qs = parse_qs(parsed.query)
+            return "list" in qs and not ("v" in qs and query.strip().lower().startswith("ytsearch"))
+    except Exception:
+        return False
+    return False
+
+
+async def extract_playlist_entries(query: str):
+    loop = asyncio.get_running_loop()
+
+    def extract():
+        options = dict(YTDL_OPTIONS)
+        options["extract_flat"] = True
+        options["skip_download"] = True
+        options["noplaylist"] = False
+        cookie_file = resolve_cookie_file()
+        if cookie_file:
+            options["cookiefile"] = cookie_file
+        return yt_dlp.YoutubeDL(options).extract_info(query, download=False)
+
+    data = await loop.run_in_executor(None, extract)
+    entries = []
+    if isinstance(data, dict):
+        for entry in (data.get("entries") or []):
+            if not entry:
+                continue
+            url = entry.get("url")
+            webpage_url = entry.get("webpage_url")
+            title = entry.get("title") or "제목 없음"
+            if webpage_url:
+                entries.append((title, webpage_url))
+            elif url:
+                if str(url).startswith("http"):
+                    entries.append((title, url))
+                else:
+                    entries.append((title, f"https://www.youtube.com/watch?v={url}"))
+    return entries
+
+
 def build_query_candidates(query: str):
+
     candidates = []
 
     def add(value: str):
@@ -803,7 +943,7 @@ class HelpView(discord.ui.View):
             "🎵 노래 명령어\n\n"
             "!입장\n"
             "!퇴장\n"
-            "!재생 노래이름\n"
+            "!재생 노래이름\n!재생 유튜브플레이리스트URL\n"
             "!정지\n"
             "!일시정지\n"
             "!다시재생\n"
@@ -1035,6 +1175,7 @@ class MusicDeleteSelect(discord.ui.Select):
             return
 
         _, removed_query = queue.pop(idx)
+        save_music_data()
         await interaction.response.send_message(f"🗑️ 대기열에서 삭제 완료: {removed_query}", ephemeral=True)
 
 
@@ -1192,6 +1333,7 @@ class MusicView(discord.ui.View):
         guild_id = self.ctx.guild.id
         state = get_music_state(guild_id)
         state["repeat"] = not state["repeat"]
+        save_music_data()
         text = "🔁 반복 켜짐" if state["repeat"] else "➡️ 반복 꺼짐"
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -1264,11 +1406,11 @@ class MusicView(discord.ui.View):
             "🎵 노래 명령어\n\n"
             "!입장\n"
             "!퇴장\n"
-            "!재생 노래이름\n"
+            "!재생 노래이름\n!재생 유튜브플레이리스트URL\n"
             "!정지\n"
             "!일시정지\n"
             "!다시재생\n"
-            "!노래리스트\n"
+            "!노래리스트\n!플레이리스트정보 URL\n"
             "!가사 가수 - 제목"
         )
         await interaction.response.send_message(text, ephemeral=True)
@@ -1577,6 +1719,36 @@ async def resume(ctx):
 async def queue_list(ctx):
     guild_id = ctx.guild.id
     await send_queue_list(ctx, guild_id)
+
+
+# =========================
+# 플레이리스트 기능
+# =========================
+@bot.command(name="플레이리스트정보")
+async def playlist_info(ctx, *, query: str):
+    if not is_youtube_playlist_url(query):
+        await ctx.send("유튜브 플레이리스트 URL을 넣어줘")
+        return
+
+    try:
+        playlist_entries = await extract_playlist_entries(query)
+    except Exception as e:
+        await ctx.send(f"❌ 플레이리스트 정보를 불러오지 못했어: {sanitize_music_error(e)}")
+        return
+
+    if not playlist_entries:
+        await ctx.send("플레이리스트 곡을 찾지 못했어")
+        return
+
+    lines = [f"📃 플레이리스트 곡 수: {len(playlist_entries)}", ""]
+    for idx, (title, _) in enumerate(playlist_entries[:20], start=1):
+        lines.append(f"{idx}. {title}")
+
+    if len(playlist_entries) > 20:
+        lines.append(f"... 외 {len(playlist_entries) - 20}곡")
+
+    for chunk in split_text("\n".join(lines), 1800):
+        await ctx.send(f"```{chunk}```")
 
 
 # =========================
