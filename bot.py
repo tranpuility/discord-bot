@@ -34,6 +34,9 @@ if not TOKEN:
 
 YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
 YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "true", "yes", "on")
+YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true", "yes", "on")
+YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
@@ -154,16 +157,22 @@ YTDL_OPTIONS = {
     "geo_bypass": True,
     "youtube_include_dash_manifest": False,
     "youtube_include_hls_manifest": False,
+    "http_headers": {
+        "User-Agent": YTDLP_USER_AGENT,
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    },
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "web"],
+            "player_client": ["android", "ios", "web_creator", "mweb", "web"],
             "player_skip": ["webpage", "configs"]
         }
-    }
+    },
+    "logger": QuietYTDLPLogger(),
 }
 
 
 def create_ytdl():
+
     options = dict(YTDL_OPTIONS)
     cookie_file = resolve_cookie_file()
     if cookie_file:
@@ -178,7 +187,13 @@ def is_blocked_music_error(error_text: str) -> bool:
         "too many requests",
         "sign in to confirm",
         "not a bot",
-        "confirm you're not a bot"
+        "confirm you're not a bot",
+        "use --cookies-from-browser",
+        "video unavailable",
+        "requested format is not available",
+        "unable to download api page",
+        "precondition check failed",
+        "this content isn't available"
     ]
     return any(keyword in lowered for keyword in blocked_keywords)
 
@@ -189,47 +204,10 @@ def sanitize_music_error(error: Exception) -> str:
         if resolve_cookie_file():
             return "❌ 유튜브 요청 제한에 걸렸어... 잠시 후 다시 시도해줘!"
         return "❌ 유튜브 요청 제한에 걸렸어. cookies.txt를 넣어주면 훨씬 안정적으로 재생할 수 있어!"
+    lowered = error_text.lower()
+    if "no results" in lowered or "not found" in lowered:
+        return "❌ 검색 결과를 찾지 못했어. 가수명이나 곡명을 더 정확하게 입력해줘!"
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
-
-
-def normalize_search_text(text: str) -> str:
-    if not text:
-        return ""
-
-    lowered = text.lower().strip()
-    replacements = {
-        "official video": " ",
-        "official mv": " ",
-        "official music video": " ",
-        "official audio": " ",
-        "audio": " ",
-        "lyrics video": " ",
-        "lyric video": " ",
-        "lyrics": " ",
-        "live clip": " ",
-        "live": " ",
-        "shorts": " ",
-        "full ver": " ",
-        "full version": " ",
-        "topic": " ",
-        "hd": " ",
-        "4k": " ",
-        "8k": " ",
-        "[": " ",
-        "]": " ",
-        "(": " ",
-        ")": " ",
-        "-": " ",
-        "_": " ",
-        "|": " ",
-        "/": " ",
-        ",": " ",
-        ".": " ",
-        ":": " ",
-    }
-    for a, b in replacements.items():
-        lowered = lowered.replace(a, b)
-    return " ".join(lowered.split())
 
 
 def build_query_candidates(query: str):
@@ -240,98 +218,20 @@ def build_query_candidates(query: str):
         if value and value not in candidates:
             candidates.append(value)
 
-    base_query = query.strip()
-    add(base_query)
-    add(f"ytsearch5:{base_query}")
-    add(f"ytsearch10:{base_query}")
+    add(query)
+    add(f"ytsearch3:{query}")
 
-    artist, title = extract_artist_title(base_query)
+    artist, title = extract_artist_title(query)
     if artist and title:
-        pair = f"{artist} {title}".strip()
-        add(f"ytsearch10:{pair} official audio")
-        add(f"ytsearch10:{pair} topic")
-        add(f"ytsearch10:{pair} audio")
-        add(f"ytsearch10:{pair} lyrics")
-        add(f"ytsearch10:{pair} live")
+        add(f"ytsearch3:{artist} {title} official audio")
+        add(f"ytsearch3:{artist} {title} topic")
+        add(f"ytsearch3:{artist} {title} lyrics")
     else:
-        add(f"ytsearch10:{base_query} official audio")
-        add(f"ytsearch10:{base_query} topic")
-        add(f"ytsearch10:{base_query} audio")
-        add(f"ytsearch10:{base_query} lyrics")
-        add(f"ytsearch10:{base_query} live")
+        add(f"ytsearch3:{query} official audio")
+        add(f"ytsearch3:{query} topic")
+        add(f"ytsearch3:{query} lyrics")
 
-    return candidates[:8]
-
-
-def score_entry_for_query(entry: dict, query: str) -> int:
-    score = 0
-
-    target = normalize_search_text(query)
-    title = normalize_search_text(entry.get("title") or "")
-    uploader = normalize_search_text(entry.get("uploader") or entry.get("channel") or "")
-    description = normalize_search_text(entry.get("description") or "")
-
-    query_tokens = [token for token in target.split() if token]
-    title_tokens = set(title.split())
-    description_tokens = set(description.split())
-
-    for token in query_tokens:
-        if token in title_tokens:
-            score += 12
-        elif token in description_tokens:
-            score += 4
-
-    if target and target in title:
-        score += 35
-    if target and target in f"{uploader} {title}":
-        score += 10
-
-    raw_title = (entry.get("title") or "").lower()
-    raw_uploader = (entry.get("uploader") or entry.get("channel") or "").lower()
-
-    positive_keywords = {
-        "official audio": 18,
-        "audio": 8,
-        "topic": 14,
-        "provided to youtube": 12,
-        "lyrics": 5,
-    }
-    for keyword, value in positive_keywords.items():
-        if keyword in raw_title or keyword in raw_uploader:
-            score += value
-
-    negative_keywords = {
-        "live": -18,
-        "cover": -22,
-        "reaction": -30,
-        "sped up": -20,
-        "slowed": -20,
-        "reverb": -20,
-        "remix": -15,
-        "mashup": -24,
-        "teaser": -18,
-        "preview": -14,
-        "shorts": -40,
-        "instrumental": -16,
-    }
-    for keyword, value in negative_keywords.items():
-        if keyword in raw_title:
-            score += value
-
-    duration = entry.get("duration")
-    if isinstance(duration, (int, float)):
-        if 90 <= duration <= 420:
-            score += 12
-        elif duration < 45:
-            score -= 35
-        elif duration > 900:
-            score -= 15
-
-    availability = (entry.get("availability") or "").lower()
-    if availability in {"private", "premium_only", "subscriber_only"}:
-        score -= 100
-
-    return score
+    return candidates[:5]
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -353,9 +253,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if not data:
                 return []
             if isinstance(data, dict) and "entries" in data:
-                entries = [entry for entry in (data.get("entries") or []) if entry]
-                entries.sort(key=lambda entry: score_entry_for_query(entry, query), reverse=True)
-                return entries
+                return [entry for entry in (data.get("entries") or []) if entry]
             return [data]
 
         blocked_error_seen = False
@@ -374,7 +272,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if not entries:
                 continue
 
-            for entry in entries[:7]:
+            for entry in entries[:3]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -383,11 +281,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     if webpage_url:
                         try:
                             current_data = await loop.run_in_executor(None, lambda u=webpage_url: extract_once(u))
-                            if isinstance(current_data, dict) and "entries" in current_data:
-                                nested_entries = [x for x in (current_data.get("entries") or []) if x]
-                                if nested_entries:
-                                    nested_entries.sort(key=lambda entry: score_entry_for_query(entry, query), reverse=True)
-                                    current_data = nested_entries[0]
                             audio_url = current_data.get("url")
                         except Exception as e:
                             last_error = e
@@ -411,7 +304,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             raise ValueError("유튜브 요청 제한 때문에 재생이 막혔어. cookies.txt를 넣은 뒤 다시 시도해줘.")
         if last_error is not None:
             raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
-        raise ValueError("검색 결과를 찾지 못했어. 가수명이나 곡명을 조금 더 정확하게 입력해줘.")
+        raise ValueError("검색 결과가 없습니다.")
 
 
 # =========================
@@ -458,8 +351,6 @@ def save_music_data():
             current_query = state["current"]["query"]
 
         queue_queries = [query for _, query in queue if isinstance(query, str)]
-        if state.get("current") and state["current"].get("query") and queue_queries and queue_queries[0] == state["current"]["query"]:
-            queue_queries = queue_queries[1:]
 
         data[str(guild_id)] = {
             "last_query": state.get("last_query") or current_query,
@@ -558,7 +449,9 @@ def get_music_state(guild_id: int):
             "last_query": None,
             "last_voice_channel_id": None,
             "restored_queue": [],
-            "fail_count": 0
+            "fail_count": 0,
+            "blocked_fail_count": 0,
+            "auto_skipped_count": 0
         }
     return music_states[guild_id]
 
@@ -701,7 +594,7 @@ async def play_next(guild_id: int):
         return
 
     try:
-        player = await YTDLSource.from_query(query)
+        player, attempted_queries = await try_resolve_player_with_fallback(query)
 
         state["current"] = {
             "title": player.title,
@@ -709,9 +602,10 @@ async def play_next(guild_id: int):
             "url": player.webpage_url or player.original_url
         }
         state["last_query"] = query
+        state["fail_count"] = 0
         if ctx.voice_client and ctx.voice_client.channel:
             state["last_voice_channel_id"] = ctx.voice_client.channel.id
-        state["restored_queue"] = [item for item in queue if isinstance(item, str)]
+        state["restored_queue"] = [saved_query for _, saved_query in queue if isinstance(saved_query, str)]
         save_music_data()
 
         def after_play(error):
@@ -732,22 +626,45 @@ async def play_next(guild_id: int):
 
         ctx.voice_client.play(player, after=after_play)
 
+        extra_line = ""
+        if len(attempted_queries) > 1:
+            extra_line = f"\n검색 보정: {len(attempted_queries)}개 후보 중 성공"
+
         await ctx.send(
             f"🎵 재생 중: **{player.title}**\n"
-            f"대기열: {len(queue)}곡",
+            f"대기열: {len(queue)}곡{extra_line}",
             view=MusicView(ctx)
         )
 
     except Exception as e:
-        print(f"곡 재생 실패, 자동 스킵: {query} | {e}")
+        error_text = str(e)
+        print(f"곡 재생 실패, 자동 스킵: {query} | {error_text}")
+
+        state["fail_count"] = state.get("fail_count", 0) + 1
+        if is_blocked_music_error(error_text):
+            state["blocked_fail_count"] = state.get("blocked_fail_count", 0) + 1
+        state["auto_skipped_count"] = state.get("auto_skipped_count", 0) + 1
+        state["current"] = None
+        save_music_data()
+
         if queue:
-            await ctx.send(f"⚠️ `{query}` 재생 실패 → 다음 곡으로 넘어갈게")
+            if is_blocked_music_error(error_text):
+                await ctx.send(
+                    f"⚠️ `{query}` 재생 실패 → 유튜브 차단/제한으로 보여서 자동 스킵할게\n"
+                    f"남은 대기열 {len(queue)}곡 계속 시도해볼게"
+                )
+            else:
+                await ctx.send(f"⚠️ `{query}` 재생 실패 → 자동으로 다음 곡으로 넘어갈게")
             await asyncio.sleep(1)
             await play_next(guild_id)
         else:
-            state["current"] = None
-            save_music_data()
-            await ctx.send(f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
+            if is_blocked_music_error(error_text):
+                await ctx.send(
+                    "⚠️ 마지막 곡도 유튜브 차단 때문에 실패했어.\n"
+                    "지금은 자동 스킵할 곡도 없어서 정지할게. cookies.txt 적용하면 훨씬 안정적이야."
+                )
+            else:
+                await ctx.send(f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
 
 
 # =========================
@@ -1118,7 +1035,6 @@ class MusicDeleteSelect(discord.ui.Select):
             return
 
         _, removed_query = queue.pop(idx)
-        save_music_data()
         await interaction.response.send_message(f"🗑️ 대기열에서 삭제 완료: {removed_query}", ephemeral=True)
 
 
@@ -1263,6 +1179,8 @@ class MusicView(discord.ui.View):
         state = get_music_state(guild_id)
         state["current"] = None
 
+        save_music_data()
+
         if self.ctx.voice_client:
             self.ctx.voice_client.stop()
             await interaction.response.send_message("⏹️ 정지 완료", ephemeral=True)
@@ -1274,7 +1192,6 @@ class MusicView(discord.ui.View):
         guild_id = self.ctx.guild.id
         state = get_music_state(guild_id)
         state["repeat"] = not state["repeat"]
-        save_music_data()
         text = "🔁 반복 켜짐" if state["repeat"] else "➡️ 반복 꺼짐"
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -1390,6 +1307,8 @@ async def on_ready():
             print(f"yt-dlp cookies 적용됨: {cookie_file}")
         else:
             print("yt-dlp cookies 미적용: cookies.txt 없으면 일부 유튜브 재생이 막힐 수 있음")
+        print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}")
+        print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
 
         # 재시동 완료 메시지 처리
         if os.path.exists(RESTART_FILE):
@@ -1711,9 +1630,31 @@ async def help_command(ctx):
 async def cookie_status(ctx):
     cookie_file = resolve_cookie_file()
     if cookie_file:
-        await ctx.send(f"✅ cookies 적용 중\n경로: `{cookie_file}`")
+        await ctx.send(
+            f"✅ cookies 적용 중\n경로: `{cookie_file}`\n"
+            f"IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'} | "
+            f"web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}"
+        )
     else:
-        await ctx.send("⚠️ cookies.txt가 없어. 유튜브 차단이 걸리면 재생이 안 될 수 있어.")
+        await ctx.send(
+            "⚠️ cookies.txt가 없어. 유튜브 차단이 걸리면 재생이 안 될 수 있어.\n"
+            f"IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'} | "
+            f"web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}"
+        )
+
+
+
+@bot.command(name="음악상태")
+async def music_status(ctx):
+    guild_id = ctx.guild.id
+    state = get_music_state(guild_id)
+    await ctx.send(
+        "🎧 음악 상태\n"
+        f"- 마지막 곡: {state.get('last_query') or '없음'}\n"
+        f"- 반복: {'켜짐' if state.get('repeat') else '꺼짐'}\n"
+        f"- 자동 스킵 수: {state.get('auto_skipped_count', 0)}\n"
+        f"- 차단 감지 수: {state.get('blocked_fail_count', 0)}"
+    )
 
 
 # =========================
