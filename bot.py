@@ -32,6 +32,9 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
+YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE", "/app/cookies.txt")
+YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "true", "yes", "on")
+
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
@@ -81,6 +84,24 @@ FFMPEG_OPTIONS = {
     "options": "-vn"
 }
 
+def resolve_cookie_file():
+    if not YTDLP_USE_COOKIES:
+        return None
+
+    candidates = [
+        YTDLP_COOKIE_FILE,
+        os.path.join(BASE_DIR, "cookies.txt"),
+        os.path.join(DATA_DIR, "cookies.txt"),
+        "/app/cookies.txt",
+    ]
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+
+    return None
+
+
 YTDL_OPTIONS = {
     "format": "bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
@@ -105,7 +126,11 @@ YTDL_OPTIONS = {
 
 
 def create_ytdl():
-    return yt_dlp.YoutubeDL(YTDL_OPTIONS)
+    options = dict(YTDL_OPTIONS)
+    cookie_file = resolve_cookie_file()
+    if cookie_file:
+        options["cookiefile"] = cookie_file
+    return yt_dlp.YoutubeDL(options)
 
 
 def is_blocked_music_error(error_text: str) -> bool:
@@ -123,7 +148,9 @@ def is_blocked_music_error(error_text: str) -> bool:
 def sanitize_music_error(error: Exception) -> str:
     error_text = str(error)
     if is_blocked_music_error(error_text):
-        return "❌ 유튜브 요청 제한에 걸렸어... 잠시 후 다시 시도해줘!"
+        if resolve_cookie_file():
+            return "❌ 유튜브 인증이 아직 막히고 있어. cookies.txt를 다시 갱신하거나 다른 곡으로 시도해줘!"
+        return "❌ 유튜브 요청 제한에 걸렸어... cookies.txt를 넣어주면 더 안정적으로 재생할 수 있어!"
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
 
 
@@ -1498,6 +1525,15 @@ async def lyrics(ctx, *, song: str = None):
 @bot.command(name="도움말")
 async def help_command(ctx):
     await ctx.send("보고 싶은 기능을 골라줘", view=HelpView())
+
+
+@bot.command(name="쿠키상태")
+async def cookie_status(ctx):
+    cookie_file = resolve_cookie_file()
+    if cookie_file:
+        await ctx.send(f"✅ cookies 적용 중\n경로: `{cookie_file}`")
+    else:
+        await ctx.send("⚠️ cookies.txt를 찾지 못했어.")
 
 
 # =========================
