@@ -32,3 +32,9 @@ calendar_*.png
 # 기타
 dist/
 build/
+
+# 빌드 최적화 (Railway)
+ffmpeg-*
+*.pdf
+*.ttf
+*.png
