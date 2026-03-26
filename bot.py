@@ -349,6 +349,7 @@ async def play_next(guild_id: int):
             "url": player.webpage_url or player.original_url
         }
         state["last_query"] = query
+        state["last_query"] = query
         if ctx.voice_client and ctx.voice_client.channel:
             state["last_voice_channel_id"] = ctx.voice_client.channel.id
 
@@ -997,11 +998,20 @@ async def on_ready():
         # 재시동 완료 메시지 처리
         if os.path.exists(RESTART_FILE):
             try:
-                with open(RESTART_FILE, "r", encoding="utf-8") as f:
+                # 같은 재시동 완료 처리가 두 번 실행되지 않도록 먼저 파일을 원자적으로 옮김
+                os.replace(RESTART_FILE, RESTART_PROCESSING_FILE)
+
+                with open(RESTART_PROCESSING_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     channel_id = data.get("channel_id")
                     message_id = data.get("message_id")
+                    guild_id = data.get("guild_id")
+                    voice_channel_id = data.get("voice_channel_id")
+                    last_query = data.get("last_query")
+                    queue_data = data.get("queue", [])
+                    repeat_state = data.get("repeat", False)
 
+                # 완료 메시지는 한 번만 처리
                 if channel_id and message_id:
                     channel = bot.get_channel(channel_id)
                     if channel:
@@ -1011,9 +1021,41 @@ async def on_ready():
                         except Exception:
                             await channel.send("✅ 재시동 완료!")
 
-                os.remove(RESTART_FILE)
+                # 자동 재입장 및 음악 상태 복구
+                if guild_id:
+                    guild = bot.get_guild(guild_id)
+                    if guild:
+                        state = get_music_state(guild_id)
+                        if last_query:
+                            state["last_query"] = last_query
+                        state["repeat"] = repeat_state
+
+                        restored_queue = []
+                        for q in queue_data:
+                            if isinstance(q, str):
+                                restored_queue.append(q)
+                        state["restored_queue"] = restored_queue
+
+                        if voice_channel_id:
+                            voice_channel = bot.get_channel(voice_channel_id)
+                            if voice_channel and getattr(voice_channel, "connect", None):
+                                try:
+                                    if guild.voice_client is None:
+                                        await voice_channel.connect()
+                                    else:
+                                        await guild.voice_client.move_to(voice_channel)
+                                    state["last_voice_channel_id"] = voice_channel_id
+                                except Exception as e:
+                                    print(f"자동 재입장 실패: {e}")
+
+                if os.path.exists(RESTART_PROCESSING_FILE):
+                    os.remove(RESTART_PROCESSING_FILE)
+            except FileNotFoundError:
+                pass
             except Exception as e:
                 print(f"재시동 완료 처리 실패: {e}")
+                if os.path.exists(RESTART_PROCESSING_FILE):
+                    os.remove(RESTART_PROCESSING_FILE)
 
         if not schedule_task_started:
             bot.loop.create_task(check_schedule())
@@ -1036,14 +1078,47 @@ async def on_message(message):
 @bot.command(name="재시동")
 @commands.is_owner()
 async def restart(ctx):
+    global RESTARTING
+
+    if RESTARTING:
+        return
+
+    RESTARTING = True
     restart_msg = await ctx.send("🔄 봇 재시작 중...")
 
-    # 채널 ID + 메시지 ID 저장
+    guild_id = ctx.guild.id if ctx.guild else None
+    voice_channel_id = None
+    last_query = None
+    queue_data = []
+    repeat_state = False
+
+    if guild_id:
+        state = get_music_state(guild_id)
+        repeat_state = state.get("repeat", False)
+        last_query = state.get("last_query")
+
+        current = state.get("current")
+        if current and not last_query:
+            last_query = current.get("query")
+
+        queue = get_guild_queue(guild_id)
+        queue_data = [query for _, query in queue if isinstance(query, str)]
+
+        if ctx.voice_client and ctx.voice_client.channel:
+            voice_channel_id = ctx.voice_client.channel.id
+        elif state.get("last_voice_channel_id"):
+            voice_channel_id = state.get("last_voice_channel_id")
+
     try:
         with open(RESTART_FILE, "w", encoding="utf-8") as f:
             json.dump({
                 "channel_id": ctx.channel.id,
-                "message_id": restart_msg.id
+                "message_id": restart_msg.id,
+                "guild_id": guild_id,
+                "voice_channel_id": voice_channel_id,
+                "last_query": last_query,
+                "queue": queue_data,
+                "repeat": repeat_state
             }, f)
     except Exception as e:
         print(f"재시작 채널 저장 실패: {e}")
