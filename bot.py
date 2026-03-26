@@ -6,7 +6,7 @@ import asyncio
 import aiohttp
 import yt_dlp
 import calendar
-import nacl
+import nacl  # PyNaCl import check
 import uuid
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
@@ -42,8 +42,8 @@ user_colors = {}
 sent_alerts = set()
 schedule_task_started = False
 
-# guild별 음악 대기열
 music_queues = {}
+music_states = {}
 
 # =========================
 # 색상 설정
@@ -70,7 +70,6 @@ FFMPEG_OPTIONS = {
     "options": "-vn"
 }
 
-YTDL_OPTIONS = {
 YTDL_OPTIONS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -111,6 +110,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
         return cls(source, data=data)
 
 
+# =========================
+# 파일 저장 / 불러오기
 # =========================
 def save_schedule():
     with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
@@ -153,6 +154,19 @@ def safe_text(text: str, limit: int):
     return text if len(text) <= limit else text[:limit]
 
 
+def split_text(text: str, size: int = 1900):
+    if not text:
+        return ["내용 없음"]
+    return [text[i:i + size] for i in range(0, len(text), size)]
+
+
+def extract_artist_title(song: str):
+    if " - " in song:
+        artist, title = song.split(" - ", 1)
+        return artist.strip(), title.strip()
+    return None, song.strip()
+
+
 def get_month_schedule_map(year: int, month: int):
     date_map = {}
     for item in schedule:
@@ -172,6 +186,56 @@ def get_guild_queue(guild_id: int):
     if guild_id not in music_queues:
         music_queues[guild_id] = []
     return music_queues[guild_id]
+
+
+def get_music_state(guild_id: int):
+    if guild_id not in music_states:
+        music_states[guild_id] = {
+            "current": None,
+            "repeat": False,
+            "history": []
+        }
+    return music_states[guild_id]
+
+
+async def send_queue_list(channel, guild_id: int):
+    queue = get_guild_queue(guild_id)
+    state = get_music_state(guild_id)
+
+    lines = []
+
+    if state["current"]:
+        lines.append(f"🎵 현재곡: {state['current']['title']}")
+    else:
+        lines.append("🎵 현재 재생 중인 곡 없음")
+
+    lines.append("")
+
+    if queue:
+        lines.append("📜 대기열")
+        for i, (_, query) in enumerate(queue, start=1):
+            lines.append(f"{i}. {query}")
+    else:
+        lines.append("📜 대기열 비어 있음")
+
+    text = "\n".join(lines)
+    for chunk in split_text(text, 1800):
+        await channel.send(f"```{chunk}```")
+
+
+async def send_schedule_list_message(target):
+    if not schedule:
+        await target.send("등록된 일정이 없어")
+        return
+
+    lines = []
+    for i, item in enumerate(schedule, start=1):
+        alert_text = "🔔" if item.get("alert_enabled") else "—"
+        lines.append(f"{i}. {item['datetime']} | {item['text']} | {item.get('name', '사용자')} | {alert_text}")
+
+    text = "\n".join(lines)
+    for chunk in split_text(text, 1800):
+        await target.send(f"```{chunk}```")
 
 
 # =========================
@@ -201,7 +265,6 @@ async def check_schedule():
                 except ValueError:
                     continue
 
-                # 정시 알림
                 if event_dt not in sent_alerts and now == event_dt:
                     try:
                         await channel.send(f"🔔 {item['name']}님의 일정 알림: {item['text']}")
@@ -224,7 +287,6 @@ async def check_schedule():
 
                     sent_alerts.add(event_dt)
 
-                # 10분 전 알림
                 if item.get("alert_10min", False):
                     before_dt = (event_time - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M")
                     before_key = f"{event_dt}_10min"
@@ -255,24 +317,41 @@ async def check_schedule():
 
 
 # =========================
-# 음악 대기열
+# 음악 재생
 # =========================
 async def play_next(guild_id: int):
     queue = get_guild_queue(guild_id)
+    state = get_music_state(guild_id)
+
     if not queue:
+        state["current"] = None
         return
 
     ctx, query = queue.pop(0)
 
     if ctx.voice_client is None:
+        state["current"] = None
         return
 
     try:
         player = await YTDLSource.from_query(query)
 
+        state["current"] = {
+            "title": player.title,
+            "query": query,
+            "url": player.webpage_url or player.original_url
+        }
+
         def after_play(error):
             if error:
                 print(f"재생 후 오류: {error}")
+
+            if state["current"]:
+                if state["repeat"]:
+                    queue.insert(0, (ctx, state["current"]["query"]))
+                else:
+                    state["history"].append(state["current"]["query"])
+
             future = asyncio.run_coroutine_threadsafe(play_next(guild_id), bot.loop)
             try:
                 future.result()
@@ -280,7 +359,12 @@ async def play_next(guild_id: int):
                 print(f"다음 곡 처리 오류: {e}")
 
         ctx.voice_client.play(player, after=after_play)
-        await ctx.send(f"🎵 재생 중: **{player.title}**")
+
+        await ctx.send(
+            f"🎵 재생 중: **{player.title}**\n"
+            f"대기열: {len(queue)}곡",
+            view=MusicView(ctx)
+        )
 
     except Exception as e:
         await ctx.send(f"오류 발생: {e}")
@@ -315,30 +399,13 @@ def create_calendar_image(year: int, month: int):
     bottom_text_font = get_font(15)
 
     card_x1, card_y1, card_x2, card_y2 = 55, 40, 1045, 1210
-    draw.rounded_rectangle(
-        (card_x1, card_y1, card_x2, card_y2),
-        radius=28,
-        fill=card_bg,
-        outline=card_outline,
-        width=3
-    )
-
-    draw.rounded_rectangle(
-        (card_x1 + 12, card_y1 + 12, card_x2 - 12, card_y2 - 12),
-        radius=24,
-        outline=(232, 228, 237),
-        width=2
-    )
+    draw.rounded_rectangle((card_x1, card_y1, card_x2, card_y2), radius=28, fill=card_bg, outline=card_outline, width=3)
+    draw.rounded_rectangle((card_x1 + 12, card_y1 + 12, card_x2 - 12, card_y2 - 12), radius=24, outline=(232, 228, 237), width=2)
 
     title = f"{year}년 {month:02d}월"
     bbox = draw.textbbox((0, 0), title, font=title_font)
     title_w = bbox[2] - bbox[0]
-    draw.text(
-        ((width - title_w) / 2, 90),
-        title,
-        fill=title_color,
-        font=title_font
-    )
+    draw.text(((width - title_w) / 2, 90), title, fill=title_color, font=title_font)
 
     days = ["월", "화", "수", "목", "금", "토", "일"]
     grid_left = 105
@@ -357,12 +424,7 @@ def create_calendar_image(year: int, month: int):
 
         bbox = draw.textbbox((0, 0), day_name, font=header_font)
         tw = bbox[2] - bbox[0]
-        draw.text(
-            (grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 170),
-            day_name,
-            fill=color,
-            font=header_font
-        )
+        draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 170), day_name, fill=color, font=header_font)
 
     cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(year, month)
@@ -378,13 +440,7 @@ def create_calendar_image(year: int, month: int):
             x2 = x1 + cell_w
             y2 = y1 + cell_h
 
-            draw.rounded_rectangle(
-                (x1, y1, x2, y2),
-                radius=16,
-                fill=cell_bg,
-                outline=cell_outline,
-                width=2
-            )
+            draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=cell_bg, outline=cell_outline, width=2)
 
             if day_num == 0:
                 continue
@@ -396,57 +452,24 @@ def create_calendar_image(year: int, month: int):
                 day_color = sun_red
 
             if is_current_month and day_num == now.day:
-                draw.rounded_rectangle(
-                    (x1, y1, x2, y2),
-                    radius=16,
-                    fill=today_fill,
-                    outline=today_outline,
-                    width=4
-                )
+                draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=today_fill, outline=today_outline, width=4)
 
-            draw.text(
-                (x1 + 14, y1 + 10),
-                str(day_num),
-                fill=day_color,
-                font=day_font
-            )
+            draw.text((x1 + 14, y1 + 10), str(day_num), fill=day_color, font=day_font)
 
             items = date_map.get(day_num, [])
             preview_y = y1 + 40
 
             for idx, item in enumerate(items[:2]):
                 preview = safe_text(item["text"], 9)
-                draw.text(
-                    (x1 + 10, preview_y + idx * 18),
-                    preview,
-                    fill=(85, 83, 92),
-                    font=schedule_font
-                )
+                draw.text((x1 + 10, preview_y + idx * 18), preview, fill=(85, 83, 92), font=schedule_font)
 
             if len(items) > 2:
                 more_text = f"+{len(items) - 2}"
-                draw.text(
-                    (x1 + 10, preview_y + 36),
-                    more_text,
-                    fill=(120, 115, 130),
-                    font=schedule_font
-                )
+                draw.text((x1 + 10, preview_y + 36), more_text, fill=(120, 115, 130), font=schedule_font)
 
     section_x1, section_y1, section_x2, section_y2 = 95, 1040, 1005, 1170
-    draw.rounded_rectangle(
-        (section_x1, section_y1, section_x2, section_y2),
-        radius=18,
-        fill=section_bg,
-        outline=cell_outline,
-        width=2
-    )
-
-    draw.text(
-        (section_x1 + 18, section_y1 + 16),
-        "오늘 일정",
-        fill=title_color,
-        font=bottom_title_font
-    )
+    draw.rounded_rectangle((section_x1, section_y1, section_x2, section_y2), radius=18, fill=section_bg, outline=cell_outline, width=2)
+    draw.text((section_x1 + 18, section_y1 + 16), "오늘 일정", fill=title_color, font=bottom_title_font)
 
     today_items = []
     for item in schedule:
@@ -462,19 +485,9 @@ def create_calendar_image(year: int, month: int):
     if today_items:
         for idx, item in enumerate(today_items[:3]):
             line = f"- {item['datetime'][11:16]} {item['text']}"
-            draw.text(
-                (section_x1 + 18, section_y1 + 48 + idx * 24),
-                line,
-                fill=text_main,
-                font=bottom_text_font
-            )
+            draw.text((section_x1 + 18, section_y1 + 48 + idx * 24), line, fill=text_main, font=bottom_text_font)
     else:
-        draw.text(
-            (section_x1 + 18, section_y1 + 52),
-            "오늘 일정 없음",
-            fill=(135, 131, 142),
-            font=bottom_text_font
-        )
+        draw.text((section_x1 + 18, section_y1 + 52), "오늘 일정 없음", fill=(135, 131, 142), font=bottom_text_font)
 
     output_file = os.path.join(BASE_DIR, f"calendar_{year}_{month}_{uuid.uuid4().hex[:8]}.png")
     image.save(output_file)
@@ -498,7 +511,11 @@ class HelpView(discord.ui.View):
             "!정지\n"
             "!일시정지\n"
             "!다시재생\n"
-            "!가사 노래이름"
+            "!가사 가수 - 제목\n"
+            "!노래리스트\n\n"
+            "🎛 노래 UI 버튼\n"
+            "1줄: ⏮ 이전곡 / ⏭ 다음곡 / ▶ / ⏹ / 🔁\n"
+            "2줄: 📜 노래리스트 / 📄 가사 / 📖 도움말 / ➕ 노래추가 / 🗑 노래삭제"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -510,25 +527,42 @@ class HelpView(discord.ui.View):
             "!캘린더 2026 03\n"
             "!일정추가 날짜 시간 내용\n"
             "!일정삭제 번호\n"
-            "!일정목록"
+            "!일정목록\n\n"
+            "📋 캘린더 UI 버튼\n"
+            "1줄: ◀ 이전달 / 다음달 ▶ / 🎨 색 선택 / 📋 일정리스트\n"
+            "2줄: 📖 도움말 / 일정등록 / 일정삭제 / 알림등록 / 알림삭제"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
 
 class HelpButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="📖 도움말",
-            style=discord.ButtonStyle.primary,
-            row=0
-        )
+        super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "보고 싶은 기능을 골라줘",
-            view=HelpView(),
-            ephemeral=True
-        )
+        await interaction.response.send_message("보고 싶은 기능을 골라줘", view=HelpView(), ephemeral=True)
+
+
+class ScheduleListButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="📋 일정리스트", style=discord.ButtonStyle.secondary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not schedule:
+            await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
+            return
+
+        lines = []
+        for i, item in enumerate(schedule, start=1):
+            alert_text = "🔔" if item.get("alert_enabled") else "—"
+            lines.append(f"{i}. {item['datetime']} | {item['text']} | {item.get('name', '사용자')} | {alert_text}")
+
+        text = "\n".join(lines)
+        chunks = split_text(text, 1800)
+
+        await interaction.response.send_message(f"```{chunks[0]}```", ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(f"```{chunk}```", ephemeral=True)
 
 
 # =========================
@@ -555,19 +589,12 @@ class ColorSelect(discord.ui.Select):
         selected_key = self.values[0]
         user_colors[user_id] = PASTEL_COLORS[selected_key]["rgb"]
         save_colors()
-        await interaction.response.send_message(
-            f"🎨 색 설정 완료: {PASTEL_COLORS[selected_key]['label']}",
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"🎨 색 설정 완료: {PASTEL_COLORS[selected_key]['label']}", ephemeral=True)
 
 
 class ColorButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="🎨 색 선택",
-            style=discord.ButtonStyle.secondary,
-            row=0
-        )
+        super().__init__(label="🎨 색 선택", style=discord.ButtonStyle.secondary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         view = discord.ui.View()
@@ -602,6 +629,26 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
         await interaction.response.send_message("✅ 일정 등록 완료\n새로 !캘린더 입력하면 반영돼", ephemeral=True)
 
 
+class AddSongModal(discord.ui.Modal, title="노래 추가"):
+    song = discord.ui.TextInput(label="노래 제목 또는 URL", placeholder="예: 아이유 밤편지 / 유튜브 링크")
+
+    def __init__(self, ctx):
+        super().__init__()
+        self.ctx = ctx
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild_id = self.ctx.guild.id
+        queue = get_guild_queue(guild_id)
+        queue.append((self.ctx, self.song.value))
+
+        voice_client = self.ctx.voice_client
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            await interaction.response.send_message(f"🎶 대기열 추가됨: {self.song.value}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"▶️ 바로 재생 시도: {self.song.value}", ephemeral=True)
+            await play_next(guild_id)
+
+
 class ScheduleSelect(discord.ui.Select):
     def __init__(self, action_type: str):
         self.action_type = action_type
@@ -610,20 +657,18 @@ class ScheduleSelect(discord.ui.Select):
         for i, item in enumerate(schedule):
             label = safe_text(f"{item['datetime']} / {item['text']}", 100)
             description = safe_text(f"{item.get('name', '사용자')}", 100)
-            options.append(
-                discord.SelectOption(
-                    label=label,
-                    description=description,
-                    value=str(i)
-                )
-            )
+            options.append(discord.SelectOption(label=label, description=description, value=str(i)))
 
-        super().__init__(
-            placeholder="일정을 선택해줘",
-            options=options[:25]
-        )
+        if not options:
+            options.append(discord.SelectOption(label="등록된 일정 없음", value="none"))
+
+        super().__init__(placeholder="일정을 선택해줘", options=options[:25])
 
     async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
+            return
+
         idx = int(self.values[0])
 
         if idx < 0 or idx >= len(schedule):
@@ -633,34 +678,67 @@ class ScheduleSelect(discord.ui.Select):
         if self.action_type == "delete":
             removed = schedule.pop(idx)
             save_schedule()
-            await interaction.response.send_message(
-                f"🗑️ 삭제 완료: {removed['datetime']} / {removed['text']}",
-                ephemeral=True
-            )
+            await interaction.response.send_message(f"🗑️ 삭제 완료: {removed['datetime']} / {removed['text']}", ephemeral=True)
 
         elif self.action_type == "add_alert":
             schedule[idx]["alert_enabled"] = True
             schedule[idx]["alert_10min"] = False
             save_schedule()
-            await interaction.response.send_message(
-                f"🔔 알림 등록 완료: {schedule[idx]['datetime']} / {schedule[idx]['text']}",
-                ephemeral=True
-            )
+            await interaction.response.send_message(f"🔔 알림 등록 완료: {schedule[idx]['datetime']} / {schedule[idx]['text']}", ephemeral=True)
 
         elif self.action_type == "delete_alert":
             schedule[idx]["alert_enabled"] = False
             schedule[idx]["alert_10min"] = False
             save_schedule()
-            await interaction.response.send_message(
-                f"🔕 알림 삭제 완료: {schedule[idx]['datetime']} / {schedule[idx]['text']}",
-                ephemeral=True
+            await interaction.response.send_message(f"🔕 알림 삭제 완료: {schedule[idx]['datetime']} / {schedule[idx]['text']}", ephemeral=True)
+
+
+class MusicDeleteSelect(discord.ui.Select):
+    def __init__(self, guild_id: int):
+        self.guild_id = guild_id
+        queue = get_guild_queue(guild_id)
+
+        options = []
+        for i, (_, query) in enumerate(queue[:25]):
+            options.append(
+                discord.SelectOption(
+                    label=safe_text(query, 100),
+                    value=str(i),
+                    description=f"{i + 1}번 대기곡"
+                )
             )
+
+        if not options:
+            options.append(discord.SelectOption(label="삭제할 곡 없음", value="none", description="대기열이 비어 있음"))
+
+        super().__init__(placeholder="삭제할 노래를 골라줘", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.send_message("삭제할 노래가 없어", ephemeral=True)
+            return
+
+        queue = get_guild_queue(self.guild_id)
+        idx = int(self.values[0])
+
+        if idx < 0 or idx >= len(queue):
+            await interaction.response.send_message("잘못된 선택이야", ephemeral=True)
+            return
+
+        _, removed_query = queue.pop(idx)
+        await interaction.response.send_message(f"🗑️ 대기열에서 삭제 완료: {removed_query}", ephemeral=True)
 
 
 class ScheduleSelectView(discord.ui.View):
     def __init__(self, action_type: str):
         super().__init__(timeout=60)
         self.add_item(ScheduleSelect(action_type))
+
+
+class MusicDeleteView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=60)
+        self.add_item(MusicDeleteSelect(guild_id))
 
 
 # =========================
@@ -673,89 +751,226 @@ class CalendarView(discord.ui.View):
         self.month = month
 
         self.add_item(ColorButton())
+        self.add_item(ScheduleListButton())
         self.add_item(HelpButton())
 
     @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
     async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-
         self.month -= 1
         if self.month < 1:
             self.month = 12
             self.year -= 1
 
         file_path = await asyncio.to_thread(create_calendar_image, self.year, self.month)
-        await interaction.message.edit(
-            attachments=[discord.File(file_path)],
-            view=self
-        )
+        await interaction.message.edit(attachments=[discord.File(file_path)], view=self)
 
     @discord.ui.button(label="다음달 ▶", style=discord.ButtonStyle.secondary, row=0)
     async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-
         self.month += 1
         if self.month > 12:
             self.month = 1
             self.year += 1
 
         file_path = await asyncio.to_thread(create_calendar_image, self.year, self.month)
-        await interaction.message.edit(
-            attachments=[discord.File(file_path)],
-            view=self
-        )
+        await interaction.message.edit(attachments=[discord.File(file_path)], view=self)
 
     @discord.ui.button(label="일정등록", style=discord.ButtonStyle.success, row=1)
     async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.send_modal(AddScheduleModal())
-        except Exception as e:
-            print(f"일정등록 버튼 오류: {e}")
+        await interaction.response.send_modal(AddScheduleModal())
 
     @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
     async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            if not schedule:
-                await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
-                return
+        if not schedule:
+            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
+            return
 
-            await interaction.response.send_message(
-                "🗑️ 삭제할 일정을 골라줘",
-                view=ScheduleSelectView("delete"),
-                ephemeral=True
-            )
-        except Exception as e:
-            print(f"일정삭제 버튼 오류: {e}")
+        await interaction.response.send_message("🗑️ 삭제할 일정을 골라줘", view=ScheduleSelectView("delete"), ephemeral=True)
 
     @discord.ui.button(label="알림등록", style=discord.ButtonStyle.primary, row=1)
     async def add_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            if not schedule:
-                await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
-                return
+        if not schedule:
+            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
+            return
 
-            await interaction.response.send_message(
-                "🔔 알림 등록할 일정을 골라줘",
-                view=ScheduleSelectView("add_alert"),
-                ephemeral=True
-            )
-        except Exception as e:
-            print(f"알림등록 버튼 오류: {e}")
+        await interaction.response.send_message("🔔 알림 등록할 일정을 골라줘", view=ScheduleSelectView("add_alert"), ephemeral=True)
 
     @discord.ui.button(label="알림삭제", style=discord.ButtonStyle.secondary, row=1)
     async def delete_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            if not schedule:
-                await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
-                return
+        if not schedule:
+            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
+            return
 
+        await interaction.response.send_message("🔕 알림 삭제할 일정을 골라줘", view=ScheduleSelectView("delete_alert"), ephemeral=True)
+
+
+# =========================
+# 음악 UI
+# =========================
+class MusicView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=3600)
+        self.ctx = ctx
+
+    @discord.ui.button(label="⏮ 이전곡", style=discord.ButtonStyle.secondary, row=0)
+    async def prev_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.ctx.guild.id
+        state = get_music_state(guild_id)
+        queue = get_guild_queue(guild_id)
+
+        if not state["history"]:
+            await interaction.response.send_message("이전곡이 없어", ephemeral=True)
+            return
+
+        prev_query = state["history"].pop()
+        queue.insert(0, (self.ctx, prev_query))
+
+        if self.ctx.voice_client:
+            self.ctx.voice_client.stop()
+            await interaction.response.send_message(f"⏮ 이전곡으로 이동: {prev_query}", ephemeral=True)
+        else:
+            await interaction.response.send_message("음성 채널에 없어", ephemeral=True)
+
+    @discord.ui.button(label="⏭ 다음곡", style=discord.ButtonStyle.secondary, row=0)
+    async def next_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.ctx.guild.id
+        queue = get_guild_queue(guild_id)
+
+        if not queue:
+            await interaction.response.send_message("다음곡이 없어", ephemeral=True)
+            return
+
+        if self.ctx.voice_client:
+            self.ctx.voice_client.stop()
+            await interaction.response.send_message("⏭ 다음곡으로 넘어갈게", ephemeral=True)
+        else:
+            await interaction.response.send_message("음성 채널에 없음", ephemeral=True)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.primary, row=0)
+    async def toggle_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.ctx.voice_client
+        if vc is None:
+            await interaction.response.send_message("음성 채널에 없어", ephemeral=True)
+            return
+
+        if vc.is_playing():
+            vc.pause()
+            await interaction.response.send_message("⏸️ 일시정지", ephemeral=True)
+        elif vc.is_paused():
+            vc.resume()
+            await interaction.response.send_message("▶️ 다시 재생", ephemeral=True)
+        else:
+            await interaction.response.send_message("현재 재생 중인 노래가 없어", ephemeral=True)
+
+    @discord.ui.button(label="⏹", style=discord.ButtonStyle.danger, row=0)
+    async def stop_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.ctx.guild.id
+        music_queues[guild_id] = []
+        state = get_music_state(guild_id)
+        state["current"] = None
+
+        if self.ctx.voice_client:
+            self.ctx.voice_client.stop()
+            await interaction.response.send_message("⏹️ 정지 완료", ephemeral=True)
+        else:
+            await interaction.response.send_message("음성 채널에 없음", ephemeral=True)
+
+    @discord.ui.button(label="🔁", style=discord.ButtonStyle.success, row=0)
+    async def repeat_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.ctx.guild.id
+        state = get_music_state(guild_id)
+        state["repeat"] = not state["repeat"]
+        text = "🔁 반복 켜짐" if state["repeat"] else "➡️ 반복 꺼짐"
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @discord.ui.button(label="📜 노래리스트", style=discord.ButtonStyle.secondary, row=1)
+    async def queue_list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.ctx.guild.id
+        state = get_music_state(guild_id)
+        queue = get_guild_queue(guild_id)
+
+        lines = []
+        if state["current"]:
+            lines.append(f"🎵 현재곡: {state['current']['title']}")
+        else:
+            lines.append("🎵 현재곡 없음")
+
+        lines.append("")
+
+        if queue:
+            lines.append("📜 대기열")
+            for i, (_, query) in enumerate(queue, start=1):
+                lines.append(f"{i}. {query}")
+        else:
+            lines.append("📜 대기열 비어 있음")
+
+        text = "\n".join(lines)
+        chunks = split_text(text, 1800)
+
+        await interaction.response.send_message(f"```{chunks[0]}```", ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(f"```{chunk}```", ephemeral=True)
+
+    @discord.ui.button(label="📄 가사", style=discord.ButtonStyle.secondary, row=1)
+    async def lyrics_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.ctx.guild.id
+        state = get_music_state(guild_id)
+        current = state["current"]
+
+        if not current:
+            await interaction.response.send_message("현재 재생 중인 곡이 없어", ephemeral=True)
+            return
+
+        song = current["title"]
+        artist, title = extract_artist_title(song)
+
+        if not artist:
             await interaction.response.send_message(
-                "🔕 알림 삭제할 일정을 골라줘",
-                view=ScheduleSelectView("delete_alert"),
+                f"현재곡 제목이 `{song}` 형태라서 자동 가사 검색이 어려워.\n`!가사 가수 - 제목` 형식으로 입력해줘.",
                 ephemeral=True
             )
-        except Exception as e:
-            print(f"알림삭제 버튼 오류: {e}")
+            return
+
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.lyrics.ovh/v1/{artist}/{title}"
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await interaction.response.send_message("가사를 못 찾았어", ephemeral=True)
+                    return
+                data = await resp.json()
+
+        text = data.get("lyrics", "없음")
+        chunks = split_text(text, 1800)
+
+        await interaction.response.send_message(f"📄 **{artist} - {title}**\n```{chunks[0]}```", ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(f"```{chunk}```", ephemeral=True)
+
+    @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
+    async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        text = (
+            "🎵 노래 UI 도움말\n\n"
+            "1줄: ⏮ 이전곡 / ⏭ 다음곡 / ▶ / ⏹ / 🔁\n"
+            "2줄: 📜 노래리스트 / 📄 가사 / 📖 도움말 / ➕ 노래추가 / 🗑 노래삭제\n\n"
+            "디스코드 버튼은 한 줄에 최대 5개까지만 넣을 수 있어서 이렇게 나눠놨어."
+        )
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @discord.ui.button(label="➕ 노래추가", style=discord.ButtonStyle.success, row=1)
+    async def add_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddSongModal(self.ctx))
+
+    @discord.ui.button(label="🗑 노래삭제", style=discord.ButtonStyle.danger, row=1)
+    async def remove_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.ctx.guild.id
+        queue = get_guild_queue(guild_id)
+
+        if not queue:
+            await interaction.response.send_message("대기열이 비어 있어", ephemeral=True)
+            return
+
+        await interaction.response.send_message("삭제할 노래를 골라줘", view=MusicDeleteView(guild_id), ephemeral=True)
 
 
 # =========================
@@ -813,6 +1028,12 @@ async def leave(ctx):
     if ctx.voice_client:
         guild_id = ctx.guild.id
         music_queues[guild_id] = []
+
+        state = get_music_state(guild_id)
+        state["current"] = None
+        state["history"] = []
+        state["repeat"] = False
+
         await ctx.voice_client.disconnect()
         await ctx.send("👋 퇴장 완료")
     else:
@@ -833,7 +1054,7 @@ async def play(ctx, *, query: str):
     queue.append((ctx, query))
 
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-        await ctx.send(f"🎶 대기열 추가됨: {query}")
+        await ctx.send(f"🎶 대기열 추가됨: {query}", view=MusicView(ctx))
     else:
         await play_next(guild_id)
 
@@ -842,6 +1063,9 @@ async def play(ctx, *, query: str):
 async def stop(ctx):
     guild_id = ctx.guild.id
     music_queues[guild_id] = []
+
+    state = get_music_state(guild_id)
+    state["current"] = None
 
     if ctx.voice_client:
         ctx.voice_client.stop()
@@ -868,17 +1092,37 @@ async def resume(ctx):
         await ctx.send("일시정지된 노래가 없어")
 
 
+@bot.command(name="노래리스트")
+async def queue_list(ctx):
+    guild_id = ctx.guild.id
+    await send_queue_list(ctx, guild_id)
+
+
 # =========================
 # 가사 기능
 # =========================
 @bot.command(name="가사")
 async def lyrics(ctx, *, song: str = None):
+    guild_id = ctx.guild.id if ctx.guild else None
+
+    if song is None and guild_id:
+        state = get_music_state(guild_id)
+        current = state.get("current")
+        if current:
+            song = current["title"]
+
     if song is None:
-        await ctx.send("노래 제목 입력해줘")
+        await ctx.send("노래 제목 입력해줘. 예시: `!가사 아이유 - 밤편지`")
+        return
+
+    artist, title = extract_artist_title(song)
+
+    if not artist:
+        await ctx.send("가사는 `가수 - 제목` 형식이 가장 잘 돼. 예: `!가사 아이유 - 밤편지`")
         return
 
     async with aiohttp.ClientSession() as session:
-        url = f"https://api.lyrics.ovh/v1/{song}"
+        url = f"https://api.lyrics.ovh/v1/{artist}/{title}"
         async with session.get(url) as resp:
             if resp.status != 200:
                 await ctx.send("가사 못 찾음")
@@ -886,10 +1130,11 @@ async def lyrics(ctx, *, song: str = None):
             data = await resp.json()
 
     text = data.get("lyrics", "없음")
-    if len(text) > 2000:
-        text = text[:2000]
+    chunks = split_text(text, 1800)
 
-    await ctx.send(f"📄 {song}\n```{text}```")
+    await ctx.send(f"📄 {artist} - {title}\n```{chunks[0]}```")
+    for chunk in chunks[1:]:
+        await ctx.send(f"```{chunk}```")
 
 
 # =========================
@@ -948,20 +1193,7 @@ async def show_calendar(ctx, year: int = None, month: int = None):
 
 @bot.command(name="일정목록")
 async def list_schedule(ctx):
-    if not schedule:
-        await ctx.send("등록된 일정이 없어")
-        return
-
-    lines = []
-    for i, item in enumerate(schedule, start=1):
-        alert_text = "🔔" if item.get("alert_enabled") else "—"
-        lines.append(f"{i}. {item['datetime']} | {item['text']} | {item.get('name', '사용자')} | {alert_text}")
-
-    text = "\n".join(lines)
-    if len(text) > 1900:
-        text = text[:1900]
-
-    await ctx.send(f"```{text}```")
+    await send_schedule_list_message(ctx)
 
 
 # =========================
