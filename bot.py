@@ -39,6 +39,8 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+RESTARTING = False
+
 schedule = []
 user_colors = {}
 sent_alerts = set()
@@ -1028,9 +1030,15 @@ async def on_message(message):
 @bot.command(name="재시동")
 @commands.is_owner()
 async def restart(ctx):
+    global RESTARTING
+
+    if RESTARTING:
+        return
+
+    RESTARTING = True
+
     restart_msg = await ctx.send("🔄 봇 재시작 중...")
 
-    # 채널 ID + 메시지 ID 저장
     try:
         with open(RESTART_FILE, "w", encoding="utf-8") as f:
             json.dump({
