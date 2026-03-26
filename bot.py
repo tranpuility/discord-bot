@@ -520,19 +520,17 @@ class HelpView(discord.ui.View):
         await interaction.response.send_message(text, ephemeral=True)
 
     @discord.ui.button(label="📅 일정", style=discord.ButtonStyle.success)
-    async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-        text = (
-            "📅 일정 명령어\n\n"
-            "!캘린더\n"
-            "!캘린더 2026 03\n"
-            "!일정추가 날짜 시간 내용\n"
-            "!일정삭제 번호\n"
-            "!일정목록\n\n"
-            "📋 캘린더 UI 버튼\n"
-            "1줄: ◀ 이전달 / 다음달 ▶ / 🎨 색 선택 / 📋 일정리스트\n"
-            "2줄: 📖 도움말 / 일정등록 / 일정삭제 / 알림등록 / 알림삭제"
-        )
-        await interaction.response.send_message(text, ephemeral=True)
+async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+    text = (
+        "📅 일정 명령어\n\n"
+        "!캘린더\n"
+        "!캘린더 2026 03\n"
+        "!일정추가 날짜 시간 내용\n"
+        "!일정삭제 번호\n"
+        "!일정목록"
+    )
+
+    await interaction.response.send_message(text, ephemeral=True)
 
 
 class HelpButton(discord.ui.Button):
@@ -948,14 +946,20 @@ class MusicView(discord.ui.View):
             await interaction.followup.send(f"```{chunk}```", ephemeral=True)
 
     @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
-    async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        text = (
-            "🎵 노래 UI 도움말\n\n"
-            "1줄: ⏮ 이전곡 / ⏭ 다음곡 / ▶ / ⏹ / 🔁\n"
-            "2줄: 📜 노래리스트 / 📄 가사 / 📖 도움말 / ➕ 노래추가 / 🗑 노래삭제\n\n"
-            "디스코드 버튼은 한 줄에 최대 5개까지만 넣을 수 있어서 이렇게 나눠놨어."
-        )
-        await interaction.response.send_message(text, ephemeral=True)
+async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    text = (
+        "🎵 노래 명령어\n\n"
+        "!입장\n"
+        "!퇴장\n"
+        "!재생 노래이름\n"
+        "!정지\n"
+        "!일시정지\n"
+        "!다시재생\n"
+        "!노래리스트\n"
+        "!가사 가수 - 제목"
+    )
+
+    await interaction.response.send_message(text, ephemeral=True)
 
     @discord.ui.button(label="➕ 노래추가", style=discord.ButtonStyle.success, row=1)
     async def add_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
