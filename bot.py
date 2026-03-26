@@ -32,7 +32,7 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
-YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE", "/app/cookies.txt")
+YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
 YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "true", "yes", "on")
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
@@ -84,15 +84,15 @@ FFMPEG_OPTIONS = {
     "options": "-vn"
 }
 
+
 def resolve_cookie_file():
     if not YTDLP_USE_COOKIES:
         return None
 
     candidates = [
         YTDLP_COOKIE_FILE,
-        os.path.join(BASE_DIR, "cookies.txt"),
         os.path.join(DATA_DIR, "cookies.txt"),
-        "/app/cookies.txt",
+        os.path.join(BASE_DIR, "cookies.txt"),
     ]
 
     for path in candidates:
@@ -103,22 +103,30 @@ def resolve_cookie_file():
 
 
 YTDL_OPTIONS = {
-    "format": "bestaudio[ext=m4a]/bestaudio/best",
+    "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "ytsearch1",
+    "default_search": "ytsearch5",
     "skip_download": True,
-    "retries": 10,
-    "fragment_retries": 10,
-    "socket_timeout": 20,
+    "retries": 15,
+    "fragment_retries": 15,
+    "socket_timeout": 30,
     "nocheckcertificate": True,
     "geo_bypass": True,
-    "youtube_include_dash_manifest": False,
-    "youtube_include_hls_manifest": False,
+    "source_address": "0.0.0.0",
+    "http_headers": {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/136.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.youtube.com/",
+    },
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "web"],
+            "player_client": ["android", "web", "tv_embedded"],
             "player_skip": ["webpage", "configs"]
         }
     }
@@ -145,12 +153,28 @@ def is_blocked_music_error(error_text: str) -> bool:
     return any(keyword in lowered for keyword in blocked_keywords)
 
 
+def is_format_music_error(error_text: str) -> bool:
+    lowered = error_text.lower()
+    return (
+        "requested format is not available" in lowered
+        or "no suitable format" in lowered
+        or "unsupported url" in lowered
+    )
+
+
+def is_url_query(query: str) -> bool:
+    lowered = query.lower().strip()
+    return lowered.startswith("http://") or lowered.startswith("https://")
+
+
 def sanitize_music_error(error: Exception) -> str:
     error_text = str(error)
     if is_blocked_music_error(error_text):
         if resolve_cookie_file():
-            return "❌ 유튜브 인증이 아직 막히고 있어. cookies.txt를 다시 갱신하거나 다른 곡으로 시도해줘!"
-        return "❌ 유튜브 요청 제한에 걸렸어... cookies.txt를 넣어주면 더 안정적으로 재생할 수 있어!"
+            return "❌ 유튜브 인증이 계속 막히고 있어. 다른 곡이나 다른 검색어로 다시 시도해줘!"
+        return "❌ 유튜브 요청 제한에 걸렸어. cookies.txt를 넣어주면 훨씬 안정적으로 재생할 수 있어!"
+    if is_format_music_error(error_text):
+        return "❌ 이 곡은 지금 재생 가능한 포맷을 찾지 못했어. 다른 영상이나 다른 검색어로 시도해줘!"
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
 
 
@@ -162,20 +186,28 @@ def build_query_candidates(query: str):
         if value and value not in candidates:
             candidates.append(value)
 
-    add(query)
-    add(f"ytsearch3:{query}")
+    if is_url_query(query):
+        add(query)
+        return candidates[:3]
 
     artist, title = extract_artist_title(query)
-    if artist and title:
-        add(f"ytsearch3:{artist} {title} official audio")
-        add(f"ytsearch3:{artist} {title} topic")
-        add(f"ytsearch3:{artist} {title} lyrics")
-    else:
-        add(f"ytsearch3:{query} official audio")
-        add(f"ytsearch3:{query} topic")
-        add(f"ytsearch3:{query} lyrics")
 
-    return candidates[:5]
+    add(f"ytsearch5:{query}")
+    add(f"ytsearch5:{query} official audio")
+    add(f"ytsearch5:{query} audio")
+    add(f"ytsearch5:{query} topic")
+    add(f"ytsearch5:{query} lyrics")
+
+    if artist and title:
+        add(f"ytsearch5:{artist} {title} official audio")
+        add(f"ytsearch5:{artist} {title} audio")
+        add(f"ytsearch5:{artist} {title} topic")
+        add(f"ytsearch5:{artist} {title} lyrics")
+        add(f"scsearch3:{artist} {title}")
+    else:
+        add(f"scsearch3:{query}")
+
+    return candidates[:10]
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -201,6 +233,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             return [data]
 
         blocked_error_seen = False
+        format_error_seen = False
         last_error = None
 
         for candidate in build_query_candidates(query):
@@ -210,13 +243,15 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 last_error = e
                 if is_blocked_music_error(str(e)):
                     blocked_error_seen = True
+                if is_format_music_error(str(e)):
+                    format_error_seen = True
                 continue
 
             entries = normalize_entries(data)
             if not entries:
                 continue
 
-            for entry in entries[:3]:
+            for entry in entries[:5]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -230,6 +265,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
                             last_error = e
                             if is_blocked_music_error(str(e)):
                                 blocked_error_seen = True
+                            if is_format_music_error(str(e)):
+                                format_error_seen = True
                             continue
 
                 if not audio_url:
@@ -243,7 +280,11 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     continue
 
         if blocked_error_seen:
-            raise ValueError("유튜브 요청이 잠시 많아서 재생이 어려워. 잠깐 뒤에 다시 시도해줘.")
+            if resolve_cookie_file():
+                raise ValueError("유튜브 인증이 계속 막혀서 재생이 어려워. 다른 곡 제목으로 다시 시도해줘.")
+            raise ValueError("유튜브 요청 제한 때문에 재생이 막혔어. cookies.txt를 넣은 뒤 다시 시도해줘.")
+        if format_error_seen:
+            raise ValueError("재생 가능한 포맷을 찾지 못했어. 다른 검색어로 다시 시도해줘.")
         if last_error is not None:
             raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
         raise ValueError("검색 결과가 없습니다.")
@@ -1211,6 +1252,12 @@ async def on_ready():
         load_colors()
         load_music_data()
 
+        cookie_file = resolve_cookie_file()
+        if cookie_file:
+            print(f"yt-dlp cookies 적용됨: {cookie_file}")
+        else:
+            print("yt-dlp cookies 미적용: cookies.txt 없으면 일부 유튜브 재생이 막힐 수 있음")
+
         # 재시동 완료 메시지 처리
         if os.path.exists(RESTART_FILE):
             try:
@@ -1533,7 +1580,7 @@ async def cookie_status(ctx):
     if cookie_file:
         await ctx.send(f"✅ cookies 적용 중\n경로: `{cookie_file}`")
     else:
-        await ctx.send("⚠️ cookies.txt를 찾지 못했어.")
+        await ctx.send("⚠️ cookies.txt가 없어. 유튜브 차단이 걸리면 재생이 안 될 수 있어.")
 
 
 # =========================
