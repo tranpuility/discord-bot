@@ -405,12 +405,11 @@ def create_calendar_image(year: int, month: int):
 # =========================
 # 도움말 UI
 # =========================
-class HelpButtonView(discord.ui.View):
+class HelpButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(timeout=120)
+        super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
 
-    @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary)
-    async def show_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def callback(self, interaction: discord.Interaction):
         text = (
             "📌 명령어 목록\n\n"
             "🎵 노래 기능\n"
@@ -463,13 +462,12 @@ class ColorSelect(discord.ui.Select):
 
 class ColorButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🎨 색 선택", style=discord.ButtonStyle.secondary, row=2)
+        super().__init__(label="🎨 색 선택", style=discord.ButtonStyle.secondary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         view = discord.ui.View()
         view.add_item(ColorSelect())
         await interaction.response.send_message("색을 보고 골라줘", view=view, ephemeral=True)
-
 
 # =========================
 # 모달 UI
@@ -575,12 +573,9 @@ class CalendarView(discord.ui.View):
         self.year = year
         self.month = month
 
-        # 🔥색선택
+        # 1줄
         self.add_item(ColorButton())
-        self.add_item(ScheduleAddButton())
-
-        # 👉 도움말
-        self.add_item(HelpButtonView().children[0])
+        self.add_item(HelpButton())
 
     @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
     async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -608,12 +603,10 @@ class CalendarView(discord.ui.View):
             view=self
         )
 
-    # ✅ 일정등록 먼저
     @discord.ui.button(label="일정등록", style=discord.ButtonStyle.success, row=1)
     async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddScheduleModal())
 
-    # ✅ 일정삭제 다음
     @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
     async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not schedule:
@@ -626,7 +619,6 @@ class CalendarView(discord.ui.View):
             ephemeral=True
         )
 
-    # ✅ 알림등록
     @discord.ui.button(label="알림등록", style=discord.ButtonStyle.primary, row=1)
     async def add_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not schedule:
@@ -639,7 +631,6 @@ class CalendarView(discord.ui.View):
             ephemeral=True
         )
 
-    # ✅ 알림삭제
     @discord.ui.button(label="알림삭제", style=discord.ButtonStyle.secondary, row=1)
     async def delete_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not schedule:
@@ -785,8 +776,9 @@ async def lyrics(ctx, *, song: str = None):
 # =========================
 @bot.command(name="도움말")
 async def help_command(ctx):
-    text = "아래 버튼 누르면 명령어 목록 보여줄게."
-    await ctx.send(text, view=HelpButtonView())
+    view = discord.ui.View()
+    view.add_item(HelpButton())
+    await ctx.send("아래 버튼 누르면 명령어 목록 보여줄게.", view=view)
 
 
 # =========================
