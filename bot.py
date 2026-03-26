@@ -24,6 +24,7 @@ if not TOKEN:
 SCHEDULE_FILE = os.path.join(BASE_DIR, "schedule.json")
 COLORS_FILE = os.path.join(BASE_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
+CALENDAR_OUTPUT_FILE = os.path.join(BASE_DIR, "calendar_output.png")
 
 # =========================
 # 기본 설정
@@ -53,6 +54,8 @@ PASTEL_COLORS = {
     "pastel_blue": {"label": "🌊 블루", "rgb": [162, 196, 255]},
     "pastel_purple": {"label": "🍇 퍼플", "rgb": [200, 180, 255]},
 }
+
+DEFAULT_COLOR = PASTEL_COLORS["pastel_blue"]["rgb"]
 
 # =========================
 # 음악 설정
@@ -125,6 +128,36 @@ def load_colors():
 
 
 # =========================
+# 공통 유틸
+# =========================
+def get_font(size: int):
+    if os.path.exists(FONT_FILE):
+        return ImageFont.truetype(FONT_FILE, size)
+    return ImageFont.load_default()
+
+
+def safe_text(text: str, limit: int):
+    if len(text) <= limit:
+        return text
+    return text[:limit]
+
+
+def get_month_schedule_map(year: int, month: int):
+    date_map = {}
+    for item in schedule:
+        dt_str = item.get("datetime", "")
+        try:
+            dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+
+        if dt.year == year and dt.month == month:
+            date_map.setdefault(dt.day, []).append(item)
+
+    return date_map
+
+
+# =========================
 # 일정 알림 체크
 # =========================
 async def check_schedule():
@@ -150,12 +183,10 @@ async def check_schedule():
                 except ValueError:
                     continue
 
-                # 정시 알림
                 if event_dt not in sent_alerts and now == event_dt:
                     await channel.send(f"🔔 {item['name']}님의 일정 알림: {item['text']}")
                     sent_alerts.add(event_dt)
 
-                # 10분 전 알림
                 if item.get("alert_10min", False):
                     before_dt = (event_time - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M")
                     before_key = f"{event_dt}_10min"
@@ -170,45 +201,176 @@ async def check_schedule():
 # =========================
 # 캘린더 이미지 생성
 # =========================
-def get_font(size: int):
-    if os.path.exists(FONT_FILE):
-        return ImageFont.truetype(FONT_FILE, size)
-    return ImageFont.load_default()
-
-
 def create_calendar_image(year: int, month: int):
-    width, height = 1200, 900
-    image = Image.new("RGB", (width, height), (255, 250, 252))
+    width, height = 1100, 1300
+    image = Image.new("RGB", (width, height), (20, 20, 24))
     draw = ImageDraw.Draw(image)
 
-    title_font = get_font(40)
-    header_font = get_font(24)
-    day_font = get_font(22)
-    small_font = get_font(18)
+    # 색상
+    outer_bg = (20, 20, 24)
+    card_bg = (245, 243, 247)
+    card_outline = (223, 219, 231)
+    cell_bg = (240, 238, 242)
+    cell_outline = (226, 221, 232)
+    title_color = (110, 101, 171)
+    text_main = (84, 82, 96)
+    sat_blue = (120, 146, 227)
+    sun_red = (222, 128, 134)
+    today_outline = (246, 102, 102)
+    today_fill = (250, 247, 248)
+    section_bg = (236, 234, 239)
+
+    # 폰트
+    title_font = get_font(42)
+    header_font = get_font(18)
+    day_font = get_font(20)
+    schedule_font = get_font(15)
+    bottom_title_font = get_font(18)
+    bottom_text_font = get_font(15)
+
+    # 큰 카드
+    card_x1, card_y1, card_x2, card_y2 = 55, 40, 1045, 1210
+    draw.rounded_rectangle(
+        (card_x1, card_y1, card_x2, card_y2),
+        radius=28,
+        fill=card_bg,
+        outline=card_outline,
+        width=3
+    )
+
+    # 안쪽 테두리
+    draw.rounded_rectangle(
+        (card_x1 + 12, card_y1 + 12, card_x2 - 12, card_y2 - 12),
+        radius=24,
+        outline=(232, 228, 237),
+        width=2
+    )
 
     # 제목
-    draw.text((40, 30), f"{year}년 {month}월", fill=(60, 60, 60), font=title_font)
+    title = f"{year}년 {month:02d}월"
+    bbox = draw.textbbox((0, 0), title, font=title_font)
+    title_w = bbox[2] - bbox[0]
+    draw.text(
+        ((width - title_w) / 2, 90),
+        title,
+        fill=title_color,
+        font=title_font
+    )
 
-    # 요일 헤더
+    # 요일
     days = ["월", "화", "수", "목", "금", "토", "일"]
-    start_x = 50
-    start_y = 110
-    cell_w = 140
-    cell_h = 90
+
+    grid_left = 105
+    grid_top = 210
+    cell_w = 124
+    cell_h = 110
+    gap_x = 10
+    gap_y = 10
 
     for i, day_name in enumerate(days):
-        color = (80, 80, 80)
+        color = text_main
         if i == 5:
-            color = (80, 120, 220)
+            color = sat_blue
         elif i == 6:
-            color = (220, 90, 90)
-        draw.text((start_x + i * cell_w + 50, start_y), day_name, fill=color, font=header_font)
+            color = sun_red
+
+        bbox = draw.textbbox((0, 0), day_name, font=header_font)
+        tw = bbox[2] - bbox[0]
+        draw.text(
+            (grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 170),
+            day_name,
+            fill=color,
+            font=header_font
+        )
 
     cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(year, month)
+    date_map = get_month_schedule_map(year, month)
 
-    # 일정 맵
-    date_map = {}
+    now = datetime.now()
+    is_current_month = (now.year == year and now.month == month)
+
+    # 날짜 셀
+    for row_idx, week in enumerate(month_days):
+        for col_idx, day_num in enumerate(week):
+            x1 = grid_left + col_idx * (cell_w + gap_x)
+            y1 = grid_top + row_idx * (cell_h + gap_y)
+            x2 = x1 + cell_w
+            y2 = y1 + cell_h
+
+            draw.rounded_rectangle(
+                (x1, y1, x2, y2),
+                radius=16,
+                fill=cell_bg,
+                outline=cell_outline,
+                width=2
+            )
+
+            if day_num == 0:
+                continue
+
+            day_color = text_main
+            if col_idx == 5:
+                day_color = sat_blue
+            elif col_idx == 6:
+                day_color = sun_red
+
+            # 오늘 강조
+            if is_current_month and day_num == now.day:
+                draw.rounded_rectangle(
+                    (x1, y1, x2, y2),
+                    radius=16,
+                    fill=today_fill,
+                    outline=today_outline,
+                    width=4
+                )
+
+            draw.text(
+                (x1 + 14, y1 + 10),
+                str(day_num),
+                fill=day_color,
+                font=day_font
+            )
+
+            items = date_map.get(day_num, [])
+            preview_y = y1 + 40
+
+            for idx, item in enumerate(items[:2]):
+                preview = safe_text(item["text"], 9)
+                draw.text(
+                    (x1 + 10, preview_y + idx * 18),
+                    preview,
+                    fill=(85, 83, 92),
+                    font=schedule_font
+                )
+
+            if len(items) > 2:
+                more_text = f"+{len(items) - 2}"
+                draw.text(
+                    (x1 + 10, preview_y + 36),
+                    more_text,
+                    fill=(120, 115, 130),
+                    font=schedule_font
+                )
+
+    # 하단 오늘 일정 박스
+    section_x1, section_y1, section_x2, section_y2 = 95, 1040, 1005, 1170
+    draw.rounded_rectangle(
+        (section_x1, section_y1, section_x2, section_y2),
+        radius=18,
+        fill=section_bg,
+        outline=cell_outline,
+        width=2
+    )
+
+    draw.text(
+        (section_x1 + 18, section_y1 + 16),
+        "오늘 일정",
+        fill=title_color,
+        font=bottom_title_font
+    )
+
+    today_items = []
     for item in schedule:
         dt_str = item.get("datetime", "")
         try:
@@ -216,48 +378,59 @@ def create_calendar_image(year: int, month: int):
         except ValueError:
             continue
 
-        if dt.year == year and dt.month == month:
-            date_map.setdefault(dt.day, []).append(item)
+        if dt.year == year and dt.month == month and is_current_month and dt.day == now.day:
+            today_items.append(item)
 
-    grid_y = start_y + 50
+    if today_items:
+        for idx, item in enumerate(today_items[:3]):
+            line = f"- {item['datetime'][11:16]} {item['text']}"
+            draw.text(
+                (section_x1 + 18, section_y1 + 48 + idx * 24),
+                line,
+                fill=text_main,
+                font=bottom_text_font
+            )
+    else:
+        draw.text(
+            (section_x1 + 18, section_y1 + 52),
+            "오늘 일정 없음",
+            fill=(135, 131, 142),
+            font=bottom_text_font
+        )
 
-    for row_idx, week in enumerate(month_days):
-        for col_idx, day_num in enumerate(week):
-            x1 = start_x + col_idx * cell_w
-            y1 = grid_y + row_idx * cell_h
-            x2 = x1 + cell_w - 10
-            y2 = y1 + cell_h - 10
+    image.save(CALENDAR_OUTPUT_FILE)
+    return CALENDAR_OUTPUT_FILE
 
-            fill_color = (255, 255, 255)
-            outline_color = (220, 220, 220)
 
-            if day_num != 0 and day_num in date_map:
-                first_color = date_map[day_num][0].get("color", [162, 196, 255])
-                fill_color = tuple(first_color)
+# =========================
+# 도움말 UI
+# =========================
+class HelpButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
 
-            draw.rounded_rectangle((x1, y1, x2, y2), radius=15, fill=fill_color, outline=outline_color, width=2)
-
-            if day_num != 0:
-                text_color = (50, 50, 50)
-                if col_idx == 5:
-                    text_color = (80, 120, 220)
-                elif col_idx == 6:
-                    text_color = (220, 90, 90)
-
-                draw.text((x1 + 10, y1 + 8), str(day_num), fill=text_color, font=day_font)
-
-                items = date_map.get(day_num, [])
-                preview_y = y1 + 38
-                for idx, item in enumerate(items[:2]):
-                    preview = f"- {item['text']}"
-                    draw.text((x1 + 10, preview_y + idx * 20), preview[:10], fill=(40, 40, 40), font=small_font)
-
-                if len(items) > 2:
-                    draw.text((x1 + 10, preview_y + 40), f"... 외 {len(items) - 2}개", fill=(70, 70, 70), font=small_font)
-
-    output_path = os.path.join(BASE_DIR, "calendar_output.png")
-    image.save(output_path)
-    return output_path
+    @discord.ui.button(label="📖 명령어 보기", style=discord.ButtonStyle.secondary)
+    async def show_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        text = (
+            "📌 **명령어 목록**\n\n"
+            "🎵 **노래 기능**\n"
+            "`!입장` : 내가 들어간 음성 채널로 봇 입장\n"
+            "`!퇴장` : 봇 음성 채널 퇴장\n"
+            "`!재생 노래이름` : 노래 검색 후 재생\n"
+            "`!정지` : 현재 재생 중인 노래 정지\n"
+            "`!일시정지` : 노래 일시정지\n"
+            "`!다시재생` : 일시정지한 노래 다시 재생\n"
+            "`!가사 노래이름` : 노래 가사 가져오기\n\n"
+            "📅 **일정 기능**\n"
+            "`!캘린더` : 이번 달 캘린더 보기\n"
+            "`!캘린더 2026 03` : 원하는 달 캘린더 보기\n"
+            "`!일정추가 2026-03-30 18:00 저녁약속` : 일정 추가\n"
+            "`!일정삭제 1` : 1번 일정 삭제\n"
+            "`!일정목록` : 등록된 일정 목록 보기\n\n"
+            "캘린더 버튼 기능:\n"
+            "`이전달` `다음달` `색 선택` `일정등록` `일정삭제` `알림등록` `알림삭제`"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
 
 
 # =========================
@@ -311,7 +484,7 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
     async def on_submit(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
         user_name = interaction.user.display_name
-        color = user_colors.get(user_id, PASTEL_COLORS["pastel_blue"]["rgb"])
+        color = user_colors.get(user_id, DEFAULT_COLOR)
 
         schedule.append({
             "datetime": f"{self.date.value} {self.time_input.value}",
@@ -340,8 +513,8 @@ class ScheduleSelect(discord.ui.Select):
 
         options = []
         for i, item in enumerate(schedule):
-            label = f"{item['datetime']} / {item['text']}"[:100]
-            description = f"{item.get('name', '사용자')}"[:100]
+            label = safe_text(f"{item['datetime']} / {item['text']}", 100)
+            description = safe_text(f"{item.get('name', '사용자')}", 100)
             options.append(
                 discord.SelectOption(
                     label=label,
@@ -456,7 +629,7 @@ class CalendarView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="알림삭제", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="알림삭제", style=discord.ButtonStyle.secondary, row=1)
     async def delete_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not schedule:
             await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
@@ -482,6 +655,13 @@ async def on_ready():
         bot.loop.create_task(check_schedule())
     except Exception as e:
         print(f"초기화 오류: {e}")
+
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    await bot.process_commands(message)
 
 
 # =========================
@@ -578,13 +758,22 @@ async def lyrics(ctx, *, song: str = None):
 
 
 # =========================
+# 도움말 명령어
+# =========================
+@bot.command(name="도움말")
+async def help_command(ctx):
+    text = "아래 버튼 누르면 명령어 목록 보여줄게."
+    await ctx.send(text, view=HelpButtonView())
+
+
+# =========================
 # 일정 명령어
 # =========================
 @bot.command(name="일정추가")
 async def add_schedule_cmd(ctx, date, time_input, *, text):
     user_id = str(ctx.author.id)
     user_name = ctx.author.display_name
-    color = user_colors.get(user_id, PASTEL_COLORS["pastel_blue"]["rgb"])
+    color = user_colors.get(user_id, DEFAULT_COLOR)
 
     schedule.append({
         "datetime": f"{date} {time_input}",
