@@ -151,9 +151,9 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "default_search": "ytsearch1",
     "skip_download": True,
-    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
-    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
-    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "20")),
+    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "3")),
+    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "3")),
+    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "12")),
     "nocheckcertificate": True,
     "geo_bypass": True,
     "youtube_include_dash_manifest": False,
@@ -362,41 +362,27 @@ def build_query_candidates(query: str):
     artist, title = extract_artist_title(query)
 
     add(query)
-    add(f"ytsearch5:{query}")
-    add(f"ytsearch10:{query}")
+    add(f"ytsearch2:{query}")
 
     if artist and title:
         base = f"{artist} {title}".strip()
-        add(f"ytsearch5:{base}")
-        add(f"ytsearch5:{base} official audio")
-        add(f"ytsearch5:{base} topic")
-        add(f"ytsearch5:{base} lyrics")
-        add(f"ytsearch5:{artist} - {title}")
-        add(f"ytsearch10:{base}")
+        add(f"ytsearch2:{base} official audio")
+        add(f"ytsearch2:{base} topic")
     else:
-        add(f"ytsearch5:{query} official audio")
-        add(f"ytsearch5:{query} topic")
-        add(f"ytsearch5:{query} lyrics")
-        add(f"ytsearch10:{query} audio")
+        add(f"ytsearch2:{query} official audio")
+        add(f"ytsearch2:{query} topic")
 
-    for guessed in guess_artist_song_candidates(query):
-        add(guessed)
-        add(f"ytsearch5:{guessed}")
-        add(f"ytsearch5:{guessed} official audio")
+    guessed = guess_artist_song_candidates(query)
+    if guessed:
+        add(f"ytsearch2:{guessed[0]}")
 
     if normalized.endswith(" 노래"):
         artist_only = normalized[:-3].strip()
-        for guessed in guess_artist_song_candidates(artist_only):
-            add(guessed)
-            add(f"ytsearch5:{guessed}")
+        guessed_artist = guess_artist_song_candidates(artist_only)
+        if guessed_artist:
+            add(f"ytsearch2:{guessed_artist[0]}")
 
-    # 최후 fallback
-    add(f"scsearch3:{query}")
-    if artist and title:
-        add(f"scsearch3:{artist} {title}")
-
-    return candidates[:20]
-
+    return candidates[:5]
 
 
 
@@ -447,7 +433,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 scored_entries.append((score, entry))
             scored_entries.sort(key=lambda item: item[0], reverse=True)
 
-            for _, entry in scored_entries[:5]:
+            for _, entry in scored_entries[:2]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -496,38 +482,36 @@ def build_resolve_attempts(query: str):
 
     artist, title = extract_artist_title(query)
     if artist and title:
-        add(f"{artist} {title}")
         add(f"{artist} {title} official audio")
         add(f"{artist} {title} topic")
     else:
         add(f"{query} official audio")
-        add(f"{query} topic")
-        add(f"{query} lyrics")
+        guessed = guess_artist_song_candidates(query)
+        if guessed:
+            add(guessed[0])
 
-    for guessed in guess_artist_song_candidates(query):
-        add(guessed)
+    return attempts[:3]
 
-    normalized = normalize_song_text(query)
-    if normalized.endswith(" 노래"):
-        artist_only = normalized[:-3].strip()
-        for guessed in guess_artist_song_candidates(artist_only):
-            add(guessed)
-
-    return attempts[:10]
 
 
 async def try_resolve_player_with_fallback(query: str):
     attempted_queries = []
+    last_error = None
 
     for candidate in build_resolve_attempts(query):
         attempted_queries.append(candidate)
         try:
             player = await YTDLSource.from_query(candidate)
             return player, attempted_queries
-        except Exception:
+        except Exception as e:
+            last_error = e
+            if is_blocked_music_error(str(e)):
+                break
             continue
 
-    # 마지막으로 원본 쿼리 에러를 그대로 올려서 안내문 유지
+    if last_error is not None:
+        raise last_error
+
     player = await YTDLSource.from_query(query)
     return player, attempted_queries or [query]
 
