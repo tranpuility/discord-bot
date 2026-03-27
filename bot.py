@@ -389,12 +389,6 @@ def build_query_candidates(query: str):
         for guessed in guess_artist_song_candidates(artist_only):
             add(guessed)
             add(f"ytsearch5:{guessed}")
-
-    # 최후 fallback
-    add(f"scsearch3:{query}")
-    if artist and title:
-        add(f"scsearch3:{artist} {title}")
-
     return candidates[:20]
 
 
