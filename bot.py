@@ -1733,7 +1733,7 @@ class MusicView(discord.ui.View):
         text = f"📄 **{artist_text} {title_text}**\n재생 위치: `{elapsed} / {total}`\n\n" + "\n".join(lines)
         await interaction.followup.send(text, ephemeral=True)
 
-@discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
     async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         text = (
             "🎵 노래 명령어\n\n"
