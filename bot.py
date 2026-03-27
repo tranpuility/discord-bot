@@ -9,6 +9,7 @@ import yt_dlp
 import calendar
 import nacl  # PyNaCl import check
 import uuid
+import re
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
@@ -62,6 +63,7 @@ schedule_task_started = False
 
 music_queues = {}
 music_states = {}
+music_panel_tasks = {}
 
 # =========================
 # 색상 설정
@@ -263,7 +265,7 @@ def guess_artist_song_candidates(query: str):
     for item in candidates:
         if item not in unique:
             unique.append(item)
-    return unique[:4]
+    return unique[:3]
 
 
 def score_entry_for_query(entry: dict, query: str) -> int:
@@ -389,12 +391,6 @@ def build_query_candidates(query: str):
         for guessed in guess_artist_song_candidates(artist_only):
             add(guessed)
             add(f"ytsearch5:{guessed}")
-
-    # 최후 fallback
-    add(f"scsearch3:{query}")
-    if artist and title:
-        add(f"scsearch3:{artist} {title}")
-
     return candidates[:20]
 
 
@@ -407,6 +403,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.title = data.get("title")
         self.webpage_url = data.get("webpage_url")
         self.original_url = data.get("original_url")
+        self.thumbnail = data.get("thumbnail")
+        self.duration = data.get("duration")
+        self.uploader = data.get("uploader")
 
     @classmethod
     async def from_query(cls, query: str):
@@ -582,6 +581,8 @@ def save_music_data():
             "repeat": state.get("repeat", False),
             "history": [item for item in state.get("history", []) if isinstance(item, str)][-20:],
             "current_query": current_query,
+            "panel_channel_id": state.get("panel_channel_id"),
+            "panel_message_id": state.get("panel_message_id"),
             "queue": queue_queries,
         }
 
@@ -615,6 +616,8 @@ def load_music_data():
         state["repeat"] = bool(saved.get("repeat", False))
         state["history"] = [item for item in saved.get("history", []) if isinstance(item, str)][-20:]
         state["restored_queue"] = [item for item in saved.get("queue", []) if isinstance(item, str)]
+        state["panel_channel_id"] = saved.get("panel_channel_id")
+        state["panel_message_id"] = saved.get("panel_message_id")
 
 
 # =========================
@@ -642,6 +645,240 @@ def extract_artist_title(song: str):
         return artist.strip(), title.strip()
     return None, song.strip()
 
+
+
+def format_mmss(seconds_value):
+    try:
+        seconds_value = int(seconds_value or 0)
+    except Exception:
+        seconds_value = 0
+    return f"{seconds_value // 60:02d}:{seconds_value % 60:02d}"
+
+
+def infer_artist_for_lyrics(song_title: str, query_text: str = ""):
+    for source in [query_text, song_title]:
+        artist, _ = extract_artist_title(source or "")
+        if artist:
+            return artist
+
+    normalized = normalize_song_text(query_text or song_title or "")
+    alias_map = {
+        "iu": "아이유",
+        "bts": "방탄소년단",
+        "ive": "아이브",
+        "aespa": "에스파",
+        "newjeans": "뉴진스",
+        "blackpink": "블랙핑크",
+    }
+
+    for artist_key, songs in POPULAR_SONG_HINTS.items():
+        artist_name = alias_map.get(artist_key, artist_key)
+        for song in songs:
+            song_norm = normalize_song_text(song)
+            if normalized and (normalized in song_norm or song_norm in normalized):
+                return artist_name
+    return None
+
+
+def build_weighted_lyric_timestamps(lines, duration):
+    lines = [line.strip() for line in (lines or []) if line and line.strip()]
+    if not lines:
+        return []
+
+    try:
+        duration = int(duration or 0)
+    except Exception:
+        duration = 0
+
+    if duration <= 0:
+        duration = max(len(lines) * 4, 1)
+
+    weights = []
+    for line in lines:
+        clean = re.sub(r"[^0-9A-Za-z가-힣]+", "", line)
+        weights.append(max(len(clean), 4))
+
+    total = max(sum(weights), 1)
+    cur = 0.0
+    timed = []
+    for idx, line in enumerate(lines):
+        timed.append({"start": int(round(cur)), "line": line})
+        cur += duration * (weights[idx] / total)
+    return timed
+
+
+def get_current_lyric_index(current: dict):
+    timed_lines = current.get("lyrics_timed_lines") or []
+    if not timed_lines:
+        return 0
+
+    started_at = current.get("started_at")
+    if not started_at:
+        return 0
+
+    elapsed = max(0, int(datetime.now().timestamp() - started_at))
+    current_idx = 0
+    for idx, item in enumerate(timed_lines):
+        if elapsed >= int(item.get("start", 0)):
+            current_idx = idx
+        else:
+            break
+    return current_idx
+
+
+async def fetch_and_store_lyrics(guild_id: int):
+    state = get_music_state(guild_id)
+    current = state.get("current")
+    if not current or current.get("lyrics_timed_lines"):
+        return
+
+    song_title = current.get("title") or ""
+    query_text = current.get("query") or ""
+
+    artist, title = extract_artist_title(song_title)
+    if not artist:
+        artist = infer_artist_for_lyrics(song_title, query_text)
+        title = song_title
+
+    if not artist or not title:
+        return
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.lyrics.ovh/v1/{artist}/{title}"
+            async with session.get(url, timeout=12) as resp:
+                if resp.status != 200:
+                    return
+                data = await resp.json()
+    except Exception:
+        return
+
+    lyrics_text = (data.get("lyrics") or "").strip()
+    if not lyrics_text:
+        return
+
+    lines = [line.strip() for line in lyrics_text.splitlines() if line.strip()]
+    current["lyrics_artist"] = artist
+    current["lyrics_title"] = title
+    current["lyrics_lines"] = lines
+    current["lyrics_timed_lines"] = build_weighted_lyric_timestamps(lines, current.get("duration"))
+    save_music_data()
+    await refresh_music_panel(guild_id)
+
+
+def build_music_embed(guild_id: int):
+    state = get_music_state(guild_id)
+    current = state.get("current")
+    queue = get_guild_queue(guild_id)
+
+    embed = discord.Embed(color=0x2B2D31)
+    if not current:
+        embed.title = "음악 패널"
+        embed.description = "현재 재생 중인 곡이 없어."
+        return embed
+
+    embed.title = f"🎵 재생 중: {current.get('title') or '제목 없음'}"
+    if current.get("url"):
+        embed.url = current.get("url")
+
+    ctx = current.get("ctx")
+    vc = ctx.voice_client if ctx else None
+    status_text = "정지"
+    if vc:
+        if vc.is_paused():
+            status_text = "일시정지"
+        elif vc.is_playing():
+            status_text = "재생 중"
+
+    embed.add_field(name="상태", value=status_text, inline=True)
+    embed.add_field(name="길이", value=format_mmss(current.get("duration")), inline=True)
+    embed.add_field(name="대기열", value=f"{len(queue)}곡", inline=True)
+    embed.add_field(name="반복", value="켜짐" if state.get("repeat") else "꺼짐", inline=True)
+
+    timed_lines = current.get("lyrics_timed_lines") or []
+    if timed_lines:
+        idx = get_current_lyric_index(current)
+        cur = timed_lines[idx]
+        lyric_lines = [f"**[{format_mmss(cur['start'])}] {cur['line']}**"]
+        if idx + 1 < len(timed_lines):
+            nxt = timed_lines[idx + 1]
+            lyric_lines.append(f"[{format_mmss(nxt['start'])}] {nxt['line']}")
+        embed.add_field(name="실시간 가사", value="\n".join(lyric_lines)[:1024], inline=False)
+    else:
+        embed.add_field(name="실시간 가사", value="가사를 자동으로 찾는 중이야...", inline=False)
+
+    thumb = current.get("thumbnail")
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+        embed.set_image(url=thumb)
+
+    return embed
+
+
+async def refresh_music_panel(guild_id: int):
+    state = get_music_state(guild_id)
+    channel_id = state.get("panel_channel_id")
+    message_id = state.get("panel_message_id")
+    current = state.get("current")
+    if not channel_id or not message_id or not current:
+        return
+
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+
+    try:
+        message = await channel.fetch_message(message_id)
+        await message.edit(embed=build_music_embed(guild_id), view=MusicView(current["ctx"]))
+    except Exception:
+        return
+
+
+async def music_panel_loop(guild_id: int):
+    try:
+        while True:
+            await asyncio.sleep(5)
+            state = get_music_state(guild_id)
+            if not state.get("current"):
+                break
+            await refresh_music_panel(guild_id)
+    finally:
+        music_panel_tasks.pop(guild_id, None)
+
+
+def ensure_music_panel_loop(guild_id: int):
+    task = music_panel_tasks.get(guild_id)
+    if task and not task.done():
+        return
+    music_panel_tasks[guild_id] = bot.loop.create_task(music_panel_loop(guild_id))
+
+
+async def send_or_update_music_panel(ctx, guild_id: int):
+    state = get_music_state(guild_id)
+    current = state.get("current")
+    if not current:
+        return
+
+    embed = build_music_embed(guild_id)
+    channel_id = state.get("panel_channel_id")
+    message_id = state.get("panel_message_id")
+
+    if channel_id and message_id:
+        channel = bot.get_channel(channel_id)
+        if channel:
+            try:
+                message = await channel.fetch_message(message_id)
+                await message.edit(embed=embed, view=MusicView(ctx))
+                ensure_music_panel_loop(guild_id)
+                return
+            except Exception:
+                pass
+
+    msg = await ctx.send(embed=embed, view=MusicView(ctx))
+    state["panel_channel_id"] = msg.channel.id
+    state["panel_message_id"] = msg.id
+    save_music_data()
+    ensure_music_panel_loop(guild_id)
 
 def get_month_schedule_map(year: int, month: int):
     date_map = {}
@@ -675,7 +912,9 @@ def get_music_state(guild_id: int):
             "restored_queue": [],
             "fail_count": 0,
             "blocked_fail_count": 0,
-            "auto_skipped_count": 0
+            "auto_skipped_count": 0,
+            "panel_channel_id": None,
+            "panel_message_id": None
         }
     return music_states[guild_id]
 
@@ -823,7 +1062,13 @@ async def play_next(guild_id: int):
         state["current"] = {
             "title": player.title,
             "query": query,
-            "url": player.webpage_url or player.original_url
+            "url": player.webpage_url or player.original_url,
+            "thumbnail": getattr(player, "thumbnail", None),
+            "duration": getattr(player, "duration", 0),
+            "started_at": int(datetime.now().timestamp()),
+            "lyrics_lines": [],
+            "lyrics_timed_lines": [],
+            "ctx": ctx
         }
         state["last_query"] = query
         state["fail_count"] = 0
@@ -854,11 +1099,10 @@ async def play_next(guild_id: int):
         if len(attempted_queries) > 1:
             extra_line = f"\n검색 보정: {len(attempted_queries)}개 후보 중 성공"
 
-        await ctx.send(
-            f"🎵 재생 중: **{player.title}**\n"
-            f"대기열: {len(queue)}곡{extra_line}",
-            view=MusicView(ctx)
-        )
+        await send_or_update_music_panel(ctx, guild_id)
+        if extra_line:
+            await ctx.send(f"🎵 재생 중: **{player.title}**{extra_line}")
+        bot.loop.create_task(fetch_and_store_lyrics(guild_id))
 
     except Exception as e:
         error_text = str(e)
@@ -1035,6 +1279,7 @@ class HelpView(discord.ui.View):
             "!노래리스트"
         )
         await interaction.response.send_message(text, ephemeral=True)
+        await refresh_music_panel(self.ctx.guild.id)
 
     @discord.ui.button(label="📅 일정", style=discord.ButtonStyle.success)
     async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1363,6 +1608,7 @@ class MusicView(discord.ui.View):
         if self.ctx.voice_client:
             self.ctx.voice_client.stop()
             await interaction.response.send_message(f"⏮ 이전곡으로 이동: {prev_query}", ephemeral=True)
+            await refresh_music_panel(self.ctx.guild.id)
         else:
             await interaction.response.send_message("음성 채널에 없어", ephemeral=True)
 
@@ -1378,6 +1624,7 @@ class MusicView(discord.ui.View):
         if self.ctx.voice_client:
             self.ctx.voice_client.stop()
             await interaction.response.send_message("⏭ 다음곡으로 넘어갈게", ephemeral=True)
+            await refresh_music_panel(self.ctx.guild.id)
         else:
             await interaction.response.send_message("음성 채널에 없음", ephemeral=True)
 
@@ -1391,9 +1638,11 @@ class MusicView(discord.ui.View):
         if vc.is_playing():
             vc.pause()
             await interaction.response.send_message("⏸️ 일시정지", ephemeral=True)
+            await refresh_music_panel(self.ctx.guild.id)
         elif vc.is_paused():
             vc.resume()
             await interaction.response.send_message("▶️ 다시 재생", ephemeral=True)
+            await refresh_music_panel(self.ctx.guild.id)
         else:
             await interaction.response.send_message("현재 재생 중인 노래가 없어", ephemeral=True)
 
@@ -1451,40 +1700,40 @@ class MusicView(discord.ui.View):
 
     @discord.ui.button(label="📄 가사", style=discord.ButtonStyle.secondary, row=1)
     async def lyrics_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
         guild_id = self.ctx.guild.id
         state = get_music_state(guild_id)
         current = state["current"]
 
         if not current:
-            await interaction.response.send_message("현재 재생 중인 곡이 없어", ephemeral=True)
+            await interaction.followup.send("현재 재생 중인 곡이 없어", ephemeral=True)
             return
 
-        song = current["title"]
-        artist, title = extract_artist_title(song)
+        if not current.get("lyrics_timed_lines"):
+            await fetch_and_store_lyrics(guild_id)
 
-        if not artist:
-            await interaction.response.send_message(
-                f"현재곡 제목이 `{song}` 형태라서 자동 가사 검색이 어려워.\n`!가사 가수 - 제목` 형식으로 입력해줘.",
-                ephemeral=True
-            )
+        timed_lines = current.get("lyrics_timed_lines") or []
+        if not timed_lines:
+            await interaction.followup.send("가사를 자동으로 찾지 못했어", ephemeral=True)
             return
 
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.lyrics.ovh/v1/{artist}/{title}"
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    await interaction.response.send_message("가사를 못 찾았어", ephemeral=True)
-                    return
-                data = await resp.json()
+        idx = get_current_lyric_index(current)
+        cur = timed_lines[idx]
+        lines = [f"**[{format_mmss(cur['start'])}] {cur['line']}**"]
+        if idx + 1 < len(timed_lines):
+            nxt = timed_lines[idx + 1]
+            lines.append(f"[{format_mmss(nxt['start'])}] {nxt['line']}")
 
-        text = data.get("lyrics", "없음")
-        chunks = split_text(text, 1800)
+        elapsed = format_mmss(max(0, int(datetime.now().timestamp() - current.get("started_at", int(datetime.now().timestamp())))))
+        total = format_mmss(current.get("duration"))
+        title_text = current.get("lyrics_title") or current.get("title")
+        artist_text = current.get("lyrics_artist") or infer_artist_for_lyrics(current.get("title"), current.get("query")) or ""
 
-        await interaction.response.send_message(f"📄 **{artist} - {title}**\n```{chunks[0]}```", ephemeral=True)
-        for chunk in chunks[1:]:
-            await interaction.followup.send(f"```{chunk}```", ephemeral=True)
+        text = f"📄 **{artist_text} {title_text}**\n재생 위치: `{elapsed} / {total}`\n\n" + "\n".join(lines)
+        await interaction.followup.send(text, ephemeral=True)
 
-    @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
+@discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
     async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         text = (
             "🎵 노래 명령어\n\n"
@@ -1601,6 +1850,24 @@ async def on_ready():
         if not schedule_task_started:
             bot.loop.create_task(check_schedule())
             schedule_task_started = True
+
+        # 자동 복구 재생 시도
+        for guild in bot.guilds:
+            try:
+                state = get_music_state(guild.id)
+                restored_queue = state.get("restored_queue") or []
+                if guild.voice_client and restored_queue and not guild.voice_client.is_playing() and not guild.voice_client.is_paused():
+                    text_channel = guild.system_channel
+                    if text_channel:
+                        dummy_message = await text_channel.send("🔄 저장된 음악 상태를 복구하는 중이야...")
+                        dummy_ctx = await bot.get_context(dummy_message)
+                        queue = get_guild_queue(guild.id)
+                        for restored_query in restored_queue:
+                            queue.append((dummy_ctx, restored_query))
+                        state["restored_queue"] = []
+                        await play_next(guild.id)
+            except Exception as e:
+                print(f"자동 복구 재생 시도 실패: {e}")
 
     except Exception as e:
         print(f"초기화 오류: {e}")
@@ -1772,7 +2039,7 @@ async def play(ctx, *, query: str = None):
         state["last_query"] = query
         save_music_data()
 
-        await ctx.send(f"📃 플레이리스트 추가 완료: {len(added_queries)}곡", view=MusicView(ctx))
+        await ctx.send(f"📃 플레이리스트 추가 완료: {len(added_queries)}곡")
 
         if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
             await play_next(guild_id)
@@ -1783,7 +2050,7 @@ async def play(ctx, *, query: str = None):
     save_music_data()
 
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-        await ctx.send(f"🎶 대기열 추가됨: {query}", view=MusicView(ctx))
+        await ctx.send(f"🎶 대기열 추가됨: {query}")
     else:
         await play_next(guild_id)
 
