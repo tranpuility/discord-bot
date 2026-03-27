@@ -389,6 +389,12 @@ def build_query_candidates(query: str):
         for guessed in guess_artist_song_candidates(artist_only):
             add(guessed)
             add(f"ytsearch5:{guessed}")
+
+    # 최후 fallback
+    add(f"scsearch3:{query}")
+    if artist and title:
+        add(f"scsearch3:{artist} {title}")
+
     return candidates[:20]
 
 
@@ -635,6 +641,72 @@ def extract_artist_title(song: str):
         artist, title = song.split(" - ", 1)
         return artist.strip(), title.strip()
     return None, song.strip()
+
+
+
+def infer_artist_from_text(song_text: str):
+    artist, _ = extract_artist_title(song_text or "")
+    if artist:
+        return artist
+
+    normalized = normalize_song_text(song_text or "")
+    if not normalized:
+        return None
+
+    alias_map = {
+        "iu": "아이유",
+        "bts": "방탄소년단",
+        "ive": "아이브",
+        "aespa": "에스파",
+        "newjeans": "뉴진스",
+        "blackpink": "블랙핑크",
+    }
+
+    for artist_key, songs in POPULAR_SONG_HINTS.items():
+        artist_name = alias_map.get(artist_key, artist_key)
+        for song in songs:
+            song_norm = normalize_song_text(song)
+            if normalized == song_norm or normalized in song_norm or song_norm in normalized:
+                return artist_name
+
+    return None
+
+
+def resolve_query_with_artist_context(state: dict, raw_query: str):
+    query = (raw_query or "").strip()
+    if not query:
+        return query, None
+
+    # 이미 가수가 포함된 입력은 그대로 사용
+    if " - " in query:
+        return query, None
+
+    normalized = normalize_song_text(query)
+    if normalized.endswith(" 노래") or normalized.endswith(" 노래 추천"):
+        return query, None
+
+    candidates = []
+
+    current = state.get("current") or {}
+    for value in [
+        current.get("query"),
+        current.get("title"),
+        state.get("last_query"),
+    ]:
+        if value and value not in candidates:
+            candidates.append(value)
+
+    context_artist = None
+    for value in candidates:
+        context_artist = infer_artist_from_text(value)
+        if context_artist:
+            break
+
+    if not context_artist:
+        return query, None
+
+    combined_query = f"{context_artist} - {query}"
+    return combined_query, context_artist
 
 
 def get_month_schedule_map(year: int, month: int):
@@ -1729,6 +1801,12 @@ async def play(ctx, *, query: str = None):
         else:
             await ctx.send("재생할 노래를 먼저 입력해줘")
             return
+
+    original_query = query
+    query, inferred_artist = resolve_query_with_artist_context(state, query)
+    if inferred_artist:
+        await ctx.send(f"🎯 이전 가수 기준으로 검색할게: **{inferred_artist} - {original_query}**")
+
 
     if ctx.voice_client is None:
         if ctx.author.voice is None:
