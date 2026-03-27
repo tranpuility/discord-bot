@@ -1,4 +1,4 @@
-# version: 2026-03-27-stable-yt-only
+# version: 2026-03-28-cookieless-workaround
 import discord
 from discord.ext import commands
 import json
@@ -35,7 +35,7 @@ if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
 YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
-YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "true", "yes", "on")
+YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "false").lower() in ("1", "true", "yes", "on")
 YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true", "yes", "on")
 YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
@@ -150,11 +150,11 @@ YTDL_OPTIONS = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "ytsearch2",
+    "default_search": "ytsearch5",
     "skip_download": True,
-    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "3")),
-    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "3")),
-    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "12")),
+    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "2")),
+    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "2")),
+    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "10")),
     "nocheckcertificate": True,
     "geo_bypass": True,
     "youtube_include_dash_manifest": False,
@@ -165,7 +165,7 @@ YTDL_OPTIONS = {
     },
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "ios", "mweb"] if YTDLP_DISABLE_WEB_CLIENT else ["android", "ios", "mweb", "web_creator", "web"],
+            "player_client": ["android"] if not YTDLP_USE_COOKIES else (["android", "ios", "mweb"] if YTDLP_DISABLE_WEB_CLIENT else ["android", "ios", "mweb", "web_creator", "web"]),
             "player_skip": ["webpage", "configs"]
         }
     },
@@ -197,7 +197,11 @@ def is_blocked_music_error(error_text: str) -> bool:
         "requested format is not available",
         "unable to download api page",
         "precondition check failed",
-        "this content isn't available"
+        "this content isn't available",
+        "signature solving failed",
+        "only images are available for download",
+        "failed to extract any player response",
+        "unable to fetch gvs po token"
     ]
     return any(keyword in lowered for keyword in blocked_keywords)
 
@@ -359,32 +363,25 @@ def build_query_candidates(query: str):
         if value and value not in candidates:
             candidates.append(value)
 
-    normalized = normalize_song_text(query)
     artist, title = extract_artist_title(query)
 
     add(query)
-    add(f"ytsearch2:{query}")
+    add(f"ytsearch1:{query}")
 
     if artist and title:
         base = f"{artist} {title}".strip()
-        add(f"ytsearch2:{base} official audio")
-        add(f"ytsearch2:{base} topic")
+        add(f"ytsearch1:{base} official audio")
+        add(f"ytsearch1:{base} topic")
         add(f"{artist} - {title}")
     else:
-        add(f"ytsearch2:{query} official audio")
-        add(f"ytsearch2:{query} topic")
+        add(f"ytsearch1:{query} official audio")
+        add(f"ytsearch1:{query} topic")
 
-    for guessed in guess_artist_song_candidates(query):
-        add(guessed)
-        add(f"ytsearch2:{guessed}")
+    guessed = guess_artist_song_candidates(query)
+    if guessed:
+        add(guessed[0])
 
-    if normalized.endswith(" 노래"):
-        artist_only = normalized[:-3].strip()
-        for guessed in guess_artist_song_candidates(artist_only):
-            add(guessed)
-            add(f"ytsearch2:{guessed}")
-    return candidates[:8]
-
+    return candidates[:4]
 
 
 
@@ -428,14 +425,14 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
             # 검색 품질 점수화
             scored_entries = []
-            for entry in entries[:6]:
+            for entry in entries[:4]:
                 if not entry:
                     continue
                 score = score_entry_for_query(entry, query)
                 scored_entries.append((score, entry))
             scored_entries.sort(key=lambda item: item[0], reverse=True)
 
-            for _, entry in scored_entries[:2]:
+            for _, entry in scored_entries[:1]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -484,37 +481,36 @@ def build_resolve_attempts(query: str):
 
     artist, title = extract_artist_title(query)
     if artist and title:
-        add(f"{artist} {title}")
         add(f"{artist} {title} official audio")
         add(f"{artist} {title} topic")
     else:
         add(f"{query} official audio")
-        add(f"{query} topic")
+        guessed = guess_artist_song_candidates(query)
+        if guessed:
+            add(guessed[0])
 
-    for guessed in guess_artist_song_candidates(query):
-        add(guessed)
+    return attempts[:3]
 
-    normalized = normalize_song_text(query)
-    if normalized.endswith(" 노래"):
-        artist_only = normalized[:-3].strip()
-        for guessed in guess_artist_song_candidates(artist_only):
-            add(guessed)
-
-    return attempts[:5]
 
 
 async def try_resolve_player_with_fallback(query: str):
     attempted_queries = []
+    last_error = None
 
     for candidate in build_resolve_attempts(query):
         attempted_queries.append(candidate)
         try:
             player = await YTDLSource.from_query(candidate)
             return player, attempted_queries
-        except Exception:
+        except Exception as e:
+            last_error = e
+            if is_blocked_music_error(str(e)):
+                break
             continue
 
-    # 마지막으로 원본 쿼리 에러를 그대로 올려서 안내문 유지
+    if last_error is not None:
+        raise last_error
+
     player = await YTDLSource.from_query(query)
     return player, attempted_queries or [query]
 
@@ -1519,7 +1515,7 @@ async def on_ready():
         if cookie_file:
             print(f"yt-dlp cookies 적용됨: {cookie_file}")
         else:
-            print("yt-dlp cookies 미적용: cookies.txt 없으면 일부 유튜브 재생이 막힐 수 있음")
+            print("yt-dlp cookies 미적용: 쿠키 없이 우회 모드로 시도할게")
         print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}")
         print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
 
@@ -1933,6 +1929,17 @@ async def cookie_status(ctx):
         )
 
 
+
+
+
+@bot.command(name="우회상태")
+async def bypass_status(ctx):
+    mode = "쿠키 사용" if resolve_cookie_file() else "쿠키 없이 우회 모드"
+    await ctx.send(
+        f"🛠 재생 모드: {mode}\n"
+        f"- web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}\n"
+        f"- IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}"
+    )
 
 @bot.command(name="음악상태")
 async def music_status(ctx):
