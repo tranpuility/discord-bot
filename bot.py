@@ -1,3 +1,9 @@
+def normalize_song_text(text: str) -> str:
+    text = text.lower()
+    text = text.replace("노래", "")
+    text = text.replace(" ", "")
+    return text.strip()
+
 import discord
 from discord.ext import commands
 import json
