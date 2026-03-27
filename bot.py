@@ -10,6 +10,7 @@ import calendar
 import nacl  # PyNaCl import check
 import uuid
 from datetime import datetime, timedelta
+from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
 
 from dotenv import load_dotenv
@@ -34,6 +35,9 @@ if not TOKEN:
 
 YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
 YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "true", "yes", "on")
+YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true", "yes", "on")
+YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
@@ -58,12 +62,6 @@ schedule_task_started = False
 
 music_queues = {}
 music_states = {}
-lyrics_panel_tasks = {}
-music_panel_tasks = {}
-
-DISCORD_DARK_BG = 0x2B2D31
-DISCORD_ACCENT = 0x5865F2
-
 
 # =========================
 # 색상 설정
@@ -153,23 +151,31 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "default_search": "ytsearch1",
     "skip_download": True,
-    "retries": 10,
-    "fragment_retries": 10,
-    "socket_timeout": 20,
+    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
+    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
+    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "20")),
     "nocheckcertificate": True,
     "geo_bypass": True,
     "youtube_include_dash_manifest": False,
     "youtube_include_hls_manifest": False,
+    "http_headers": {
+        "User-Agent": YTDLP_USER_AGENT,
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    },
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "web"],
+            "player_client": ["android", "ios", "mweb"] if YTDLP_DISABLE_WEB_CLIENT else ["android", "ios", "mweb", "web_creator", "web"],
             "player_skip": ["webpage", "configs"]
         }
-    }
+    },
+    "logger": QuietYTDLPLogger(),
 }
+if YTDLP_FORCE_IPV4:
+    YTDL_OPTIONS["source_address"] = "0.0.0.0"
 
 
 def create_ytdl():
+
     options = dict(YTDL_OPTIONS)
     cookie_file = resolve_cookie_file()
     if cookie_file:
@@ -184,7 +190,13 @@ def is_blocked_music_error(error_text: str) -> bool:
         "too many requests",
         "sign in to confirm",
         "not a bot",
-        "confirm you're not a bot"
+        "confirm you're not a bot",
+        "use --cookies-from-browser",
+        "video unavailable",
+        "requested format is not available",
+        "unable to download api page",
+        "precondition check failed",
+        "this content isn't available"
     ]
     return any(keyword in lowered for keyword in blocked_keywords)
 
@@ -195,31 +207,197 @@ def sanitize_music_error(error: Exception) -> str:
         if resolve_cookie_file():
             return "❌ 유튜브 요청 제한에 걸렸어... 잠시 후 다시 시도해줘!"
         return "❌ 유튜브 요청 제한에 걸렸어. cookies.txt를 넣어주면 훨씬 안정적으로 재생할 수 있어!"
+    lowered = error_text.lower()
+    if "no results" in lowered or "not found" in lowered:
+        return "❌ 검색 결과를 찾지 못했어. 가수명이나 곡명을 더 정확하게 입력해줘!"
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
+
+
+
+POPULAR_SONG_HINTS = {
+    "아이유": ["아이유 좋은날", "아이유 밤편지", "아이유 blueming", "아이유 라일락"],
+    "iu": ["IU Good Day", "IU Through the Night", "IU Blueming", "IU LILAC"],
+    "뉴진스": ["NewJeans Hype Boy", "NewJeans Ditto", "NewJeans Super Shy", "NewJeans Attention"],
+    "newjeans": ["NewJeans Hype Boy", "NewJeans Ditto", "NewJeans Super Shy", "NewJeans Attention"],
+    "아이브": ["IVE I AM", "IVE LOVE DIVE", "IVE After LIKE", "IVE 해야"],
+    "ive": ["IVE I AM", "IVE LOVE DIVE", "IVE After LIKE", "IVE 해야"],
+    "방탄소년단": ["BTS Dynamite", "BTS 봄날", "BTS Butter", "BTS 작은 것들을 위한 시"],
+    "bts": ["BTS Dynamite", "BTS Spring Day", "BTS Butter", "BTS Boy With Luv"],
+    "블랙핑크": ["BLACKPINK How You Like That", "BLACKPINK Pink Venom", "BLACKPINK Shut Down"],
+    "blackpink": ["BLACKPINK How You Like That", "BLACKPINK Pink Venom", "BLACKPINK Shut Down"],
+    "에스파": ["aespa Supernova", "aespa Drama", "aespa Next Level"],
+    "aespa": ["aespa Supernova", "aespa Drama", "aespa Next Level"],
+}
+
+NEGATIVE_TITLE_KEYWORDS = [
+    "cover", "karaoke", "mr", "inst", "instrumental", "reaction", "shorts",
+    "sped up", "speed up", "slowed", "reverb", "live clip", "teaser", "preview"
+]
+
+POSITIVE_TITLE_KEYWORDS = [
+    "official audio", "official", "audio", "topic", "lyrics", "mv", "music video"
+]
+
+
+def normalize_song_text(text_value: str) -> str:
+    return " ".join((text_value or "").strip().lower().split())
+
+
+def guess_artist_song_candidates(query: str):
+    normalized = normalize_song_text(query)
+    candidates = []
+
+    for artist_key, songs in POPULAR_SONG_HINTS.items():
+        if normalized == artist_key or normalized == f"{artist_key} 노래" or normalized == f"{artist_key} 노래 추천":
+            candidates.extend(songs)
+            break
+
+    if not candidates and normalized.endswith(" 노래"):
+        artist = normalized[:-3].strip()
+        for artist_key, songs in POPULAR_SONG_HINTS.items():
+            if artist == artist_key:
+                candidates.extend(songs)
+                break
+
+    unique = []
+    for item in candidates:
+        if item not in unique:
+            unique.append(item)
+    return unique[:4]
+
+
+def score_entry_for_query(entry: dict, query: str) -> int:
+    title = normalize_song_text(entry.get("title", ""))
+    uploader = normalize_song_text(entry.get("uploader", ""))
+    description = normalize_song_text(entry.get("description", ""))[:500]
+    query_norm = normalize_song_text(query)
+
+    score = 0
+    if query_norm and query_norm in title:
+        score += 10
+
+    artist, song_title = extract_artist_title(query)
+    if artist:
+        artist_norm = normalize_song_text(artist)
+        title_norm = normalize_song_text(song_title)
+        if artist_norm in title or artist_norm in uploader:
+            score += 12
+        if title_norm and title_norm in title:
+            score += 12
+
+    for word in POSITIVE_TITLE_KEYWORDS:
+        if word in title or word in description:
+            score += 4
+
+    for word in NEGATIVE_TITLE_KEYWORDS:
+        if word in title or word in description:
+            score -= 8
+
+    if "topic" in uploader:
+        score += 6
+
+    duration = entry.get("duration")
+    if isinstance(duration, (int, float)):
+        if 90 <= duration <= 420:
+            score += 3
+        elif duration < 45 or duration > 900:
+            score -= 6
+
+    return score
+
+
+def is_youtube_playlist_url(query: str) -> bool:
+    try:
+        parsed = urlparse(query.strip())
+        if parsed.netloc and ("youtube.com" in parsed.netloc or "youtu.be" in parsed.netloc):
+            qs = parse_qs(parsed.query)
+            return "list" in qs and not ("v" in qs and query.strip().lower().startswith("ytsearch"))
+    except Exception:
+        return False
+    return False
+
+
+async def extract_playlist_entries(query: str):
+    loop = asyncio.get_running_loop()
+
+    def extract():
+        options = dict(YTDL_OPTIONS)
+        options["extract_flat"] = True
+        options["skip_download"] = True
+        options["noplaylist"] = False
+        cookie_file = resolve_cookie_file()
+        if cookie_file:
+            options["cookiefile"] = cookie_file
+        return yt_dlp.YoutubeDL(options).extract_info(query, download=False)
+
+    data = await loop.run_in_executor(None, extract)
+    entries = []
+    if isinstance(data, dict):
+        for entry in (data.get("entries") or []):
+            if not entry:
+                continue
+            url = entry.get("url")
+            webpage_url = entry.get("webpage_url")
+            title = entry.get("title") or "제목 없음"
+            if webpage_url:
+                entries.append((title, webpage_url))
+            elif url:
+                if str(url).startswith("http"):
+                    entries.append((title, url))
+                else:
+                    entries.append((title, f"https://www.youtube.com/watch?v={url}"))
+    return entries
+
 
 
 def build_query_candidates(query: str):
     candidates = []
 
     def add(value: str):
-        value = value.strip()
+        value = (value or "").strip()
         if value and value not in candidates:
             candidates.append(value)
 
-    add(query)
-    add(f"ytsearch3:{query}")
-
+    normalized = normalize_song_text(query)
     artist, title = extract_artist_title(query)
-    if artist and title:
-        add(f"ytsearch3:{artist} {title} official audio")
-        add(f"ytsearch3:{artist} {title} topic")
-        add(f"ytsearch3:{artist} {title} lyrics")
-    else:
-        add(f"ytsearch3:{query} official audio")
-        add(f"ytsearch3:{query} topic")
-        add(f"ytsearch3:{query} lyrics")
 
-    return candidates[:5]
+    add(query)
+    add(f"ytsearch5:{query}")
+    add(f"ytsearch10:{query}")
+
+    if artist and title:
+        base = f"{artist} {title}".strip()
+        add(f"ytsearch5:{base}")
+        add(f"ytsearch5:{base} official audio")
+        add(f"ytsearch5:{base} topic")
+        add(f"ytsearch5:{base} lyrics")
+        add(f"ytsearch5:{artist} - {title}")
+        add(f"ytsearch10:{base}")
+    else:
+        add(f"ytsearch5:{query} official audio")
+        add(f"ytsearch5:{query} topic")
+        add(f"ytsearch5:{query} lyrics")
+        add(f"ytsearch10:{query} audio")
+
+    for guessed in guess_artist_song_candidates(query):
+        add(guessed)
+        add(f"ytsearch5:{guessed}")
+        add(f"ytsearch5:{guessed} official audio")
+
+    if normalized.endswith(" 노래"):
+        artist_only = normalized[:-3].strip()
+        for guessed in guess_artist_song_candidates(artist_only):
+            add(guessed)
+            add(f"ytsearch5:{guessed}")
+
+    # 최후 fallback
+    add(f"scsearch3:{query}")
+    if artist and title:
+        add(f"scsearch3:{artist} {title}")
+
+    return candidates[:20]
+
+
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -229,9 +407,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.title = data.get("title")
         self.webpage_url = data.get("webpage_url")
         self.original_url = data.get("original_url")
-        self.thumbnail = data.get("thumbnail")
-        self.duration = data.get("duration")
-        self.uploader = data.get("uploader")
 
     @classmethod
     async def from_query(cls, query: str):
@@ -263,7 +438,16 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if not entries:
                 continue
 
-            for entry in entries[:3]:
+            # 검색 품질 점수화
+            scored_entries = []
+            for entry in entries[:10]:
+                if not entry:
+                    continue
+                score = score_entry_for_query(entry, query)
+                scored_entries.append((score, entry))
+            scored_entries.sort(key=lambda item: item[0], reverse=True)
+
+            for _, entry in scored_entries[:5]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -297,6 +481,55 @@ class YTDLSource(discord.PCMVolumeTransformer):
             raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
         raise ValueError("검색 결과가 없습니다.")
 
+
+
+
+def build_resolve_attempts(query: str):
+    attempts = []
+
+    def add(value: str):
+        value = (value or "").strip()
+        if value and value not in attempts:
+            attempts.append(value)
+
+    add(query)
+
+    artist, title = extract_artist_title(query)
+    if artist and title:
+        add(f"{artist} {title}")
+        add(f"{artist} {title} official audio")
+        add(f"{artist} {title} topic")
+    else:
+        add(f"{query} official audio")
+        add(f"{query} topic")
+        add(f"{query} lyrics")
+
+    for guessed in guess_artist_song_candidates(query):
+        add(guessed)
+
+    normalized = normalize_song_text(query)
+    if normalized.endswith(" 노래"):
+        artist_only = normalized[:-3].strip()
+        for guessed in guess_artist_song_candidates(artist_only):
+            add(guessed)
+
+    return attempts[:10]
+
+
+async def try_resolve_player_with_fallback(query: str):
+    attempted_queries = []
+
+    for candidate in build_resolve_attempts(query):
+        attempted_queries.append(candidate)
+        try:
+            player = await YTDLSource.from_query(candidate)
+            return player, attempted_queries
+        except Exception:
+            continue
+
+    # 마지막으로 원본 쿼리 에러를 그대로 올려서 안내문 유지
+    player = await YTDLSource.from_query(query)
+    return player, attempted_queries or [query]
 
 # =========================
 # 파일 저장 / 불러오기
@@ -410,300 +643,6 @@ def extract_artist_title(song: str):
     return None, song.strip()
 
 
-def format_mmss(seconds_value):
-    try:
-        seconds_value = int(seconds_value or 0)
-    except Exception:
-        seconds_value = 0
-    return f"{seconds_value // 60:02d}:{seconds_value % 60:02d}"
-
-
-def extract_best_thumbnail(info: dict):
-    if not isinstance(info, dict):
-        return None
-    thumbnails = info.get("thumbnails") or []
-    if thumbnails:
-        last = thumbnails[-1] or {}
-        if last.get("url"):
-            return last.get("url")
-    return info.get("thumbnail")
-
-
-async def fetch_lyrics_text_by_song(song: str):
-    artist, title = extract_artist_title(song)
-    if not artist:
-        return None, None, None, []
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.lyrics.ovh/v1/{artist}/{title}"
-            async with session.get(url, timeout=12) as resp:
-                if resp.status != 200:
-                    return artist, title, None, []
-                data = await resp.json()
-    except Exception:
-        return artist, title, None, []
-    lyrics_text = (data.get("lyrics") or "").strip()
-    if not lyrics_text:
-        return artist, title, None, []
-    lines = [line.strip() for line in lyrics_text.splitlines() if line.strip()]
-    return artist, title, lyrics_text, lines
-
-
-def estimate_current_lyric_index(current: dict):
-    lines = current.get("lyrics_lines") or []
-    if not lines:
-        return 0
-    duration = int(current.get("duration") or 0)
-    started_at = current.get("started_at")
-    if not started_at or duration <= 0:
-        return 0
-    elapsed = max(0, int(datetime.now().timestamp() - started_at))
-    if duration <= 0:
-        return 0
-    idx = int((elapsed / max(duration, 1)) * len(lines))
-    if idx >= len(lines):
-        idx = len(lines) - 1
-    return max(0, idx)
-
-
-def build_music_embed(guild_id: int):
-    state = get_music_state(guild_id)
-    current = state.get("current")
-    queue = get_guild_queue(guild_id)
-    if not current:
-        embed = discord.Embed(
-            title="음악 패널",
-            description="현재 재생 중인 곡이 없어.",
-            color=DISCORD_DARK_BG
-        )
-        return embed
-
-    artist = current.get("artist") or "알 수 없음"
-    song_title = current.get("song_title") or current.get("title") or "제목 없음"
-    duration_text = format_mmss(current.get("duration"))
-    status_text = "정지"
-    vc = None
-    if current.get("ctx") is not None:
-        vc = current["ctx"].voice_client
-    if vc:
-        if vc.is_paused():
-            status_text = "일시정지"
-        elif vc.is_playing():
-            status_text = "재생 중"
-
-    embed = discord.Embed(
-        title=song_title,
-        url=current.get("url"),
-        description=f"**{artist}**",
-        color=DISCORD_DARK_BG
-    )
-    embed.add_field(name="길이", value=duration_text, inline=True)
-    embed.add_field(name="반복", value=("켜짐" if state.get("repeat") else "꺼짐"), inline=True)
-    embed.add_field(name="대기열", value=f"{len(queue)}곡", inline=True)
-    embed.add_field(name="상태", value=status_text, inline=True)
-    if current.get("lyrics_lines"):
-        idx = estimate_current_lyric_index(current)
-        prev_line = current["lyrics_lines"][idx - 1] if idx - 1 >= 0 else " "
-        now_line = current["lyrics_lines"][idx] if idx < len(current["lyrics_lines"]) else " "
-        next_line = current["lyrics_lines"][idx + 1] if idx + 1 < len(current["lyrics_lines"]) else " "
-        lyrics_block = f"{prev_line}\n**{now_line}**\n{next_line}"
-        embed.add_field(name="실시간 가사", value=lyrics_block[:1024], inline=False)
-        embed.set_footer(text="가사는 추정 싱크로 표시돼.")
-    else:
-        embed.add_field(name="실시간 가사", value="현재 곡은 자동 가사 싱크를 찾지 못했어.", inline=False)
-
-    thumbnail = current.get("thumbnail")
-    if thumbnail:
-        embed.set_thumbnail(url=thumbnail)
-        embed.set_image(url=thumbnail)
-    return embed
-
-
-async def refresh_music_panel(guild_id: int):
-    state = get_music_state(guild_id)
-    channel_id = state.get("panel_channel_id")
-    message_id = state.get("panel_message_id")
-    if not channel_id or not message_id:
-        return
-    channel = bot.get_channel(channel_id)
-    if not channel:
-        return
-    try:
-        message = await channel.fetch_message(message_id)
-        await message.edit(embed=build_music_embed(guild_id), view=MusicView(state["current"]["ctx"]) if state.get("current") else None)
-    except Exception:
-        return
-
-
-async def music_panel_loop(guild_id: int):
-    try:
-        while True:
-            await asyncio.sleep(6)
-            state = get_music_state(guild_id)
-            current = state.get("current")
-            if not current:
-                break
-            await refresh_music_panel(guild_id)
-    finally:
-        music_panel_tasks.pop(guild_id, None)
-
-
-def ensure_music_panel_loop(guild_id: int):
-    task = music_panel_tasks.get(guild_id)
-    if task and not task.done():
-        return
-    music_panel_tasks[guild_id] = bot.loop.create_task(music_panel_loop(guild_id))
-
-
-async def search_popular_song_choices(query: str, limit: int = 4):
-    loop = asyncio.get_running_loop()
-    search_candidates = guess_artist_song_candidates(query)
-    if not search_candidates:
-        artist, title = extract_artist_title(query)
-        if not artist and normalize_song_text(query).endswith(" 노래"):
-            artist = query.rsplit("노래", 1)[0].strip()
-        if artist:
-            search_candidates = [f"{artist} 인기곡", f"{artist} official audio", f"{artist} topic"]
-        else:
-            search_candidates = [query]
-
-    def extract():
-        results = []
-        ydl = create_ytdl()
-        for search_query in search_candidates[:4]:
-            try:
-                data = ydl.extract_info(f"ytsearch5:{search_query}", download=False)
-            except Exception:
-                continue
-            entries = (data or {}).get("entries") or []
-            for entry in entries:
-                if entry:
-                    results.append(entry)
-        return results
-
-    raw_entries = await loop.run_in_executor(None, extract)
-    ranked = sorted(raw_entries, key=lambda e: score_entry_for_query(e, query), reverse=True)
-    seen = set()
-    choices = []
-    for entry in ranked:
-        title = entry.get("title") or "제목 없음"
-        webpage_url = entry.get("webpage_url") or entry.get("url")
-        if not webpage_url:
-            continue
-        key = normalize_song_text(title)
-        if key in seen:
-            continue
-        seen.add(key)
-        uploader = entry.get("uploader") or "업로더 없음"
-        duration_text = format_mmss(entry.get("duration"))
-        choices.append({
-            "title": title,
-            "query": title,
-            "uploader": uploader,
-            "duration": duration_text,
-            "url": webpage_url
-        })
-        if len(choices) >= limit:
-            break
-    return choices
-
-
-def needs_popular_choice_ui(query: str) -> bool:
-    normalized = normalize_song_text(query)
-    if normalized in POPULAR_SONG_HINTS:
-        return True
-    return normalized.endswith(" 노래") or normalized.endswith(" 노래 추천")
-
-
-async def queue_song_and_maybe_play(ctx, query: str, interaction: discord.Interaction = None):
-    guild_id = ctx.guild.id
-    state = get_music_state(guild_id)
-
-    if ctx.voice_client is None:
-        if ctx.author.voice is None:
-            if interaction:
-                await interaction.response.send_message("음성 채널 먼저 들어가줘", ephemeral=True)
-            else:
-                await ctx.send("음성 채널 먼저 들어가줘")
-            return
-        await ctx.author.voice.channel.connect()
-        state["last_voice_channel_id"] = ctx.author.voice.channel.id
-    elif ctx.voice_client.channel:
-        state["last_voice_channel_id"] = ctx.voice_client.channel.id
-
-    queue = get_guild_queue(guild_id)
-    restored_queue = state.get("restored_queue", [])
-    if restored_queue:
-        for restored_query in restored_queue:
-            queue.append((ctx, restored_query))
-        state["restored_queue"] = []
-
-    queue.append((ctx, query))
-    state["last_query"] = query
-    update_artist_context_from_query(state, query)
-    save_music_data()
-
-    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-        if interaction:
-            await interaction.response.send_message(f"🎶 대기열 추가됨: {query}", ephemeral=True)
-        else:
-            await ctx.send(f"🎶 대기열 추가됨: {query}", view=MusicView(ctx))
-    else:
-        if interaction:
-            await interaction.response.send_message(f"▶️ 선택한 곡 재생 시도: {query}", ephemeral=True)
-        await play_next(guild_id)
-
-
-
-def resolve_query_with_artist_context(state: dict, raw_query: str):
-    query = (raw_query or "").strip()
-    if not query:
-        return query, None
-
-    # 이미 가수 - 제목 형식이면 그대로 사용
-    if " - " in query:
-        return query, None
-
-    context_artist = (state.get("artist_context") or "").strip()
-    if not context_artist:
-        return query, None
-
-    context_norm = normalize_song_text(context_artist)
-    query_norm = normalize_song_text(query)
-
-    # "아이유 좋은날"처럼 이전 가수와 같은 가수를 다시 쓴 경우 -> 제목만 뽑아서 정리
-    if context_norm and query_norm.startswith(context_norm + " "):
-        title_only = query[len(context_artist):].strip()
-        if title_only:
-            return f"{context_artist} - {title_only}", context_artist
-        return query, None
-
-    # 제목만 입력했을 때만 이전 가수 붙이기
-    # 공백이 있으면 다른 가수/검색어일 가능성이 높아서 그대로 둠
-    if " " in query:
-        return query, None
-
-    return f"{context_artist} - {query}", context_artist
-
-
-def update_artist_context_from_query(state: dict, query: str):
-    query = (query or "").strip()
-    if not query:
-        return
-
-    artist, _ = extract_artist_title(query)
-    if artist:
-        state["artist_context"] = artist
-        return
-
-    # "아이유 좋은날" 같이 가수명이 앞에 붙은 경우 지원
-    normalized = normalize_song_text(query)
-    for artist_key in POPULAR_SONG_HINTS.keys():
-        artist_norm = normalize_song_text(artist_key)
-        if normalized.startswith(artist_norm + " "):
-            state["artist_context"] = artist_key
-            return
-
 def get_month_schedule_map(year: int, month: int):
     date_map = {}
     for item in schedule:
@@ -734,8 +673,9 @@ def get_music_state(guild_id: int):
             "last_query": None,
             "last_voice_channel_id": None,
             "restored_queue": [],
-            "artist_context": None,
-            "fail_count": 0
+            "fail_count": 0,
+            "blocked_fail_count": 0,
+            "auto_skipped_count": 0
         }
     return music_states[guild_id]
 
@@ -878,26 +818,18 @@ async def play_next(guild_id: int):
         return
 
     try:
-        player = await YTDLSource.from_query(query)
+        player, attempted_queries = await try_resolve_player_with_fallback(query)
 
-        artist_guess, title_guess = extract_artist_title(query)
         state["current"] = {
             "title": player.title,
             "query": query,
-            "url": player.webpage_url or player.original_url,
-            "thumbnail": extract_best_thumbnail(player.data) or getattr(player, "thumbnail", None),
-            "duration": getattr(player, "duration", None),
-            "uploader": getattr(player, "uploader", None),
-            "started_at": int(datetime.now().timestamp()),
-            "artist": artist_guess,
-            "song_title": title_guess if artist_guess else player.title,
-            "ctx": ctx,
-            "lyrics_lines": []
+            "url": player.webpage_url or player.original_url
         }
         state["last_query"] = query
+        state["fail_count"] = 0
         if ctx.voice_client and ctx.voice_client.channel:
             state["last_voice_channel_id"] = ctx.voice_client.channel.id
-        state["restored_queue"] = [item for item in queue if isinstance(item, str)]
+        state["restored_queue"] = [saved_query for _, saved_query in queue if isinstance(saved_query, str)]
         save_music_data()
 
         def after_play(error):
@@ -918,22 +850,45 @@ async def play_next(guild_id: int):
 
         ctx.voice_client.play(player, after=after_play)
 
+        extra_line = ""
+        if len(attempted_queries) > 1:
+            extra_line = f"\n검색 보정: {len(attempted_queries)}개 후보 중 성공"
+
         await ctx.send(
             f"🎵 재생 중: **{player.title}**\n"
-            f"대기열: {len(queue)}곡",
+            f"대기열: {len(queue)}곡{extra_line}",
             view=MusicView(ctx)
         )
 
     except Exception as e:
-        print(f"곡 재생 실패, 자동 스킵: {query} | {e}")
+        error_text = str(e)
+        print(f"곡 재생 실패, 자동 스킵: {query} | {error_text}")
+
+        state["fail_count"] = state.get("fail_count", 0) + 1
+        if is_blocked_music_error(error_text):
+            state["blocked_fail_count"] = state.get("blocked_fail_count", 0) + 1
+        state["auto_skipped_count"] = state.get("auto_skipped_count", 0) + 1
+        state["current"] = None
+        save_music_data()
+
         if queue:
-            await ctx.send(f"⚠️ `{query}` 재생 실패 → 다음 곡으로 넘어갈게")
+            if is_blocked_music_error(error_text):
+                await ctx.send(
+                    f"⚠️ `{query}` 재생 실패 → 유튜브 차단/제한으로 보여서 자동 스킵할게\n"
+                    f"남은 대기열 {len(queue)}곡 계속 시도해볼게"
+                )
+            else:
+                await ctx.send(f"⚠️ `{query}` 재생 실패 → 자동으로 다음 곡으로 넘어갈게")
             await asyncio.sleep(1)
             await play_next(guild_id)
         else:
-            state["current"] = None
-            save_music_data()
-            await ctx.send(f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
+            if is_blocked_music_error(error_text):
+                await ctx.send(
+                    "⚠️ 마지막 곡도 유튜브 차단 때문에 실패했어.\n"
+                    "지금은 자동 스킵할 곡도 없어서 정지할게. cookies.txt 적용하면 훨씬 안정적이야."
+                )
+            else:
+                await ctx.send(f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
 
 
 # =========================
@@ -1072,7 +1027,7 @@ class HelpView(discord.ui.View):
             "🎵 노래 명령어\n\n"
             "!입장\n"
             "!퇴장\n"
-            "!재생 노래이름\n"
+            "!재생 노래이름\n!재생 유튜브플레이리스트URL\n"
             "!정지\n"
             "!일시정지\n"
             "!다시재생\n"
@@ -1227,34 +1182,6 @@ class AddSongModal(discord.ui.Modal, title="노래 추가"):
             await play_next(guild_id)
 
 
-class PopularSongChoiceButton(discord.ui.Button):
-    def __init__(self, ctx, choice_index: int, choice: dict):
-        super().__init__(
-            label=f"{choice_index + 1}",
-            style=discord.ButtonStyle.primary if choice_index == 0 else discord.ButtonStyle.secondary,
-            row=1
-        )
-        self.ctx = ctx
-        self.choice = choice
-
-    async def callback(self, interaction: discord.Interaction):
-        await queue_song_and_maybe_play(self.ctx, self.choice["query"], interaction=interaction)
-
-
-class PopularSongChoiceView(discord.ui.View):
-    def __init__(self, ctx, query: str, choices: list[dict]):
-        super().__init__(timeout=120)
-        self.ctx = ctx
-        self.query = query
-        self.choices = choices
-        for idx, choice in enumerate(choices[:4]):
-            self.add_item(PopularSongChoiceButton(ctx, idx, choice))
-
-    @discord.ui.button(label="취소", style=discord.ButtonStyle.danger, row=1)
-    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("인기곡 선택을 닫았어", ephemeral=True)
-
-
 class ScheduleSelect(discord.ui.Select):
     def __init__(self, action_type: str):
         self.action_type = action_type
@@ -1332,6 +1259,7 @@ class MusicDeleteSelect(discord.ui.Select):
             return
 
         _, removed_query = queue.pop(idx)
+        save_music_data()
         await interaction.response.send_message(f"🗑️ 대기열에서 삭제 완료: {removed_query}", ephemeral=True)
 
 
@@ -1476,6 +1404,8 @@ class MusicView(discord.ui.View):
         state = get_music_state(guild_id)
         state["current"] = None
 
+        save_music_data()
+
         if self.ctx.voice_client:
             self.ctx.voice_client.stop()
             await interaction.response.send_message("⏹️ 정지 완료", ephemeral=True)
@@ -1487,6 +1417,7 @@ class MusicView(discord.ui.View):
         guild_id = self.ctx.guild.id
         state = get_music_state(guild_id)
         state["repeat"] = not state["repeat"]
+        save_music_data()
         text = "🔁 반복 켜짐" if state["repeat"] else "➡️ 반복 꺼짐"
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -1518,7 +1449,7 @@ class MusicView(discord.ui.View):
         for chunk in chunks[1:]:
             await interaction.followup.send(f"```{chunk}```", ephemeral=True)
 
-    @discord.ui.button(label="🎤 실시간가사", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="📄 가사", style=discord.ButtonStyle.secondary, row=1)
     async def lyrics_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = self.ctx.guild.id
         state = get_music_state(guild_id)
@@ -1528,70 +1459,30 @@ class MusicView(discord.ui.View):
             await interaction.response.send_message("현재 재생 중인 곡이 없어", ephemeral=True)
             return
 
-        if current.get("lyrics_lines"):
-            idx = estimate_current_lyric_index(current)
-            window = current["lyrics_lines"][max(0, idx - 2): idx + 3]
-            lines = []
-            focus = 2 if len(window) >= 3 else len(window) - 1
-            for i, line in enumerate(window):
-                lines.append(f"**{line}**" if i == focus else line)
-            embed = discord.Embed(
-                title="실시간 가사",
-                description="\n".join(lines)[:4000],
-                color=DISCORD_DARK_BG
-            )
-            embed.set_footer(text="자동 싱크는 추정 기반이야.")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
         song = current["title"]
-        artist, title, lyrics_text, lyrics_lines = await fetch_lyrics_text_by_song(song)
+        artist, title = extract_artist_title(song)
 
-        if not lyrics_text:
+        if not artist:
             await interaction.response.send_message(
-                f"현재곡 `{song}`의 가사를 자동으로 찾지 못했어.\n`!가사 가수 - 제목`으로 직접 입력해줘.",
+                f"현재곡 제목이 `{song}` 형태라서 자동 가사 검색이 어려워.\n`!가사 가수 - 제목` 형식으로 입력해줘.",
                 ephemeral=True
             )
             return
 
-        current["lyrics_lines"] = lyrics_lines
-        current["artist"] = artist or current.get("artist")
-        current["song_title"] = title or current.get("song_title")
-        save_music_data()
-        await refresh_music_panel(guild_id)
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.lyrics.ovh/v1/{artist}/{title}"
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await interaction.response.send_message("가사를 못 찾았어", ephemeral=True)
+                    return
+                data = await resp.json()
 
-        embed = discord.Embed(
-            title=f"{artist} - {title}",
-            description="\n".join(lyrics_lines[:8])[:4000],
-            color=DISCORD_DARK_BG
-        )
-        embed.set_footer(text="패널에서는 자동으로 줄이 넘어가.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        text = data.get("lyrics", "없음")
+        chunks = split_text(text, 1800)
 
-    @discord.ui.button(label="🔥 인기곡", style=discord.ButtonStyle.secondary, row=1)
-    async def popular_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild_id = self.ctx.guild.id
-        state = get_music_state(guild_id)
-        current = state.get("current")
-        seed_query = state.get("last_query") or (current.get("artist") if current else None)
-        if not seed_query:
-            await interaction.response.send_message("기준이 될 가수나 곡이 아직 없어", ephemeral=True)
-            return
-
-        choices = await search_popular_song_choices(seed_query)
-        if not choices:
-            await interaction.response.send_message("인기곡 후보를 찾지 못했어", ephemeral=True)
-            return
-
-        desc_lines = []
-        for idx, choice in enumerate(choices, start=1):
-            desc_lines.append(f"**{idx}.** {choice['title']}\n{choice['uploader']} · {choice['duration']}")
-        embed = discord.Embed(
-            title="인기곡 선택",
-            description="\n\n".join(desc_lines),
-            color=DISCORD_DARK_BG
-        )
-        await interaction.response.send_message(embed=embed, view=PopularSongChoiceView(self.ctx, seed_query, choices), ephemeral=True)
+        await interaction.response.send_message(f"📄 **{artist} - {title}**\n```{chunks[0]}```", ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(f"```{chunk}```", ephemeral=True)
 
     @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
     async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1599,11 +1490,11 @@ class MusicView(discord.ui.View):
             "🎵 노래 명령어\n\n"
             "!입장\n"
             "!퇴장\n"
-            "!재생 노래이름\n"
+            "!재생 노래이름\n!재생 유튜브플레이리스트URL\n"
             "!정지\n"
             "!일시정지\n"
             "!다시재생\n"
-            "!노래리스트\n"
+            "!노래리스트\n!플레이리스트정보 URL\n"
             "!가사 가수 - 제목"
         )
         await interaction.response.send_message(text, ephemeral=True)
@@ -1642,6 +1533,8 @@ async def on_ready():
             print(f"yt-dlp cookies 적용됨: {cookie_file}")
         else:
             print("yt-dlp cookies 미적용: cookies.txt 없으면 일부 유튜브 재생이 막힐 수 있음")
+        print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}")
+        print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
 
         # 재시동 완료 메시지 처리
         if os.path.exists(RESTART_FILE):
@@ -1743,7 +1636,6 @@ async def restart(ctx):
     if guild_id:
         state = get_music_state(guild_id)
         repeat_state = state.get("repeat", False)
-        state["artist_context"] = None
         last_query = state.get("last_query")
 
         current = state.get("current")
@@ -1800,7 +1692,6 @@ async def join(ctx):
 
         state = get_music_state(ctx.guild.id)
         state["last_voice_channel_id"] = channel.id
-        state["artist_context"] = None
         save_music_data()
 
         await ctx.send(f"✅ {channel.name} 입장 완료")
@@ -1822,13 +1713,13 @@ async def leave(ctx):
         state["history"] = []
         state["repeat"] = False
         state["restored_queue"] = []
-        state["artist_context"] = None
         save_music_data()
 
         await ctx.voice_client.disconnect()
         await ctx.send("👋 퇴장 완료")
     else:
         await ctx.send("음성 채널에 없음")
+
 
 
 @bot.command(name="재생")
@@ -1845,27 +1736,56 @@ async def play(ctx, *, query: str = None):
             await ctx.send("재생할 노래를 먼저 입력해줘")
             return
 
-    original_query = query
-    query, inferred_artist = resolve_query_with_artist_context(state, query)
-    if inferred_artist and query != original_query:
-        await ctx.send(f"🎯 이전 가수 기준으로 검색할게: **{query}**")
+    if ctx.voice_client is None:
+        if ctx.author.voice is None:
+            await ctx.send("음성 채널 먼저 들어가줘")
+            return
+        await ctx.author.voice.channel.connect()
+        state["last_voice_channel_id"] = ctx.author.voice.channel.id
+    elif ctx.voice_client.channel:
+        state["last_voice_channel_id"] = ctx.voice_client.channel.id
 
-    if needs_popular_choice_ui(query):
-        choices = await search_popular_song_choices(query)
-        if choices:
-            desc_lines = []
-            for idx, choice in enumerate(choices, start=1):
-                desc_lines.append(f"**{idx}.** {choice['title']}\n{choice['uploader']} · {choice['duration']}")
-            embed = discord.Embed(
-                title="인기곡 선택",
-                description="\n\n".join(desc_lines),
-                color=DISCORD_DARK_BG
-            )
-            embed.set_footer(text="버튼을 눌러 바로 재생해줘.")
-            await ctx.send(embed=embed, view=PopularSongChoiceView(ctx, query, choices))
+    queue = get_guild_queue(guild_id)
+
+    restored_queue = state.get("restored_queue", [])
+    if restored_queue:
+        for restored_query in restored_queue:
+            queue.append((ctx, restored_query))
+        state["restored_queue"] = []
+
+    if is_youtube_playlist_url(query):
+        try:
+            playlist_entries = await extract_playlist_entries(query)
+        except Exception as e:
+            await ctx.send(f"❌ 플레이리스트를 불러오지 못했어: {sanitize_music_error(e)}")
             return
 
-    await queue_song_and_maybe_play(ctx, query)
+        if not playlist_entries:
+            await ctx.send("플레이리스트 안에서 재생할 곡을 찾지 못했어")
+            return
+
+        added_queries = []
+        for _, entry_url in playlist_entries:
+            queue.append((ctx, entry_url))
+            added_queries.append(entry_url)
+
+        state["last_query"] = query
+        save_music_data()
+
+        await ctx.send(f"📃 플레이리스트 추가 완료: {len(added_queries)}곡", view=MusicView(ctx))
+
+        if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+            await play_next(guild_id)
+        return
+
+    queue.append((ctx, query))
+    state["last_query"] = query
+    save_music_data()
+
+    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+        await ctx.send(f"🎶 대기열 추가됨: {query}", view=MusicView(ctx))
+    else:
+        await play_next(guild_id)
 
 
 @bot.command(name="정지")
@@ -1912,6 +1832,36 @@ async def queue_list(ctx):
 
 
 # =========================
+# 플레이리스트 기능
+# =========================
+@bot.command(name="플레이리스트정보")
+async def playlist_info(ctx, *, query: str):
+    if not is_youtube_playlist_url(query):
+        await ctx.send("유튜브 플레이리스트 URL을 넣어줘")
+        return
+
+    try:
+        playlist_entries = await extract_playlist_entries(query)
+    except Exception as e:
+        await ctx.send(f"❌ 플레이리스트 정보를 불러오지 못했어: {sanitize_music_error(e)}")
+        return
+
+    if not playlist_entries:
+        await ctx.send("플레이리스트 곡을 찾지 못했어")
+        return
+
+    lines = [f"📃 플레이리스트 곡 수: {len(playlist_entries)}", ""]
+    for idx, (title, _) in enumerate(playlist_entries[:20], start=1):
+        lines.append(f"{idx}. {title}")
+
+    if len(playlist_entries) > 20:
+        lines.append(f"... 외 {len(playlist_entries) - 20}곡")
+
+    for chunk in split_text("\n".join(lines), 1800):
+        await ctx.send(f"```{chunk}```")
+
+
+# =========================
 # 가사 기능
 # =========================
 @bot.command(name="가사")
@@ -1944,15 +1894,6 @@ async def lyrics(ctx, *, song: str = None):
 
     text = data.get("lyrics", "없음")
     chunks = split_text(text, 1800)
-    if guild_id:
-        state = get_music_state(guild_id)
-        current = state.get("current")
-        if current:
-            current["lyrics_lines"] = [line.strip() for line in text.splitlines() if line.strip()]
-            current["artist"] = artist
-            current["song_title"] = title
-            save_music_data()
-            await refresh_music_panel(guild_id)
 
     await ctx.send(f"📄 {artist} - {title}\n```{chunks[0]}```")
     for chunk in chunks[1:]:
@@ -1971,9 +1912,31 @@ async def help_command(ctx):
 async def cookie_status(ctx):
     cookie_file = resolve_cookie_file()
     if cookie_file:
-        await ctx.send(f"✅ cookies 적용 중\n경로: `{cookie_file}`")
+        await ctx.send(
+            f"✅ cookies 적용 중\n경로: `{cookie_file}`\n"
+            f"IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'} | "
+            f"web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}"
+        )
     else:
-        await ctx.send("⚠️ cookies.txt가 없어. 유튜브 차단이 걸리면 재생이 안 될 수 있어.")
+        await ctx.send(
+            "⚠️ cookies.txt가 없어. 유튜브 차단이 걸리면 재생이 안 될 수 있어.\n"
+            f"IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'} | "
+            f"web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}"
+        )
+
+
+
+@bot.command(name="음악상태")
+async def music_status(ctx):
+    guild_id = ctx.guild.id
+    state = get_music_state(guild_id)
+    await ctx.send(
+        "🎧 음악 상태\n"
+        f"- 마지막 곡: {state.get('last_query') or '없음'}\n"
+        f"- 반복: {'켜짐' if state.get('repeat') else '꺼짐'}\n"
+        f"- 자동 스킵 수: {state.get('auto_skipped_count', 0)}\n"
+        f"- 차단 감지 수: {state.get('blocked_fail_count', 0)}"
+    )
 
 
 # =========================
