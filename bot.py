@@ -9,7 +9,6 @@ import yt_dlp
 import calendar
 import nacl  # PyNaCl import check
 import uuid
-import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
@@ -39,14 +38,6 @@ YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "tru
 YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true", "yes", "on")
 YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
-
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-
-spotify_token_cache = {
-    "access_token": None,
-    "expires_at": 0,
-}
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
@@ -115,7 +106,6 @@ def resolve_cookie_file():
     return None
 
 
-
 class QuietYTDLPLogger:
     def debug(self, msg):
         lowered = str(msg).lower()
@@ -160,9 +150,9 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "default_search": "ytsearch1",
     "skip_download": True,
-    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
-    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
-    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "20")),
+    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "3")),
+    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "3")),
+    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "12")),
     "nocheckcertificate": True,
     "geo_bypass": True,
     "youtube_include_dash_manifest": False,
@@ -220,7 +210,6 @@ def sanitize_music_error(error: Exception) -> str:
     if "no results" in lowered or "not found" in lowered:
         return "❌ 검색 결과를 찾지 못했어. 가수명이나 곡명을 더 정확하게 입력해줘!"
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
-
 
 
 POPULAR_SONG_HINTS = {
@@ -358,168 +347,28 @@ async def extract_playlist_entries(query: str):
     return entries
 
 
-
-
-def spotify_is_enabled() -> bool:
-    return bool(SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET)
-
-
-async def get_spotify_access_token():
-    if not spotify_is_enabled():
-        return None
-
-    now = int(time.time())
-    token = spotify_token_cache.get("access_token")
-    expires_at = int(spotify_token_cache.get("expires_at") or 0)
-    if token and now < expires_at - 30:
-        return token
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://accounts.spotify.com/api/token",
-                data={"grant_type": "client_credentials"},
-                auth=aiohttp.BasicAuth(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET),
-                timeout=12,
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-    except Exception:
-        return None
-
-    access_token = data.get("access_token")
-    expires_in = int(data.get("expires_in") or 3600)
-    if not access_token:
-        return None
-
-    spotify_token_cache["access_token"] = access_token
-    spotify_token_cache["expires_at"] = now + expires_in
-    return access_token
-
-
-async def spotify_search_best_track(query: str):
-    token = await get_spotify_access_token()
-    if not token:
-        return None
-
-    headers = {"Authorization": f"Bearer {token}"}
-    candidates = []
-
-    for market in ["KR", "JP", "US"]:
-        try:
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(
-                    "https://api.spotify.com/v1/search",
-                    params={"q": query, "type": "track", "limit": 5, "market": market},
-                    timeout=12,
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-        except Exception:
-            continue
-
-        items = (((data or {}).get("tracks") or {}).get("items") or [])
-        for item in items:
-            artists = [a.get("name") for a in (item.get("artists") or []) if a.get("name")]
-            title = item.get("name")
-            if artists and title:
-                candidates.append({
-                    "artist": artists[0],
-                    "title": title,
-                    "popularity": int(item.get("popularity") or 0),
-                    "market": market,
-                })
-
-    if not candidates:
-        return None
-
-    query_norm = normalize_song_text(query)
-
-    def score(item):
-        score = int(item.get("popularity") or 0)
-        full = normalize_song_text(f"{item['artist']} {item['title']}")
-        title_norm = normalize_song_text(item["title"])
-        if query_norm and query_norm in full:
-            score += 30
-        if query_norm and query_norm in title_norm:
-            score += 15
-        return score
-
-    candidates.sort(key=score, reverse=True)
-    best = candidates[0]
-    best["display"] = f"{best['artist']} - {best['title']}"
-    return best
-
-
-async def get_multilingual_search_hints(query: str):
-    info = await spotify_search_best_track(query)
-    if not info:
-        return []
-
-    hints = []
-
-    def add(v: str):
-        v = (v or "").strip()
-        if v and v not in hints:
-            hints.append(v)
-
-    add(info["display"])
-    add(f"{info['artist']} {info['title']}")
-    add(f"{info['artist']} {info['title']} official audio")
-    add(f"{info['artist']} {info['title']} topic")
-    return hints[:4]
-
-
 def build_query_candidates(query: str):
+
     candidates = []
 
     def add(value: str):
-        value = (value or "").strip()
+        value = value.strip()
         if value and value not in candidates:
             candidates.append(value)
 
-    normalized = normalize_song_text(query)
-    artist, title = extract_artist_title(query)
-
     add(query)
-    add(f"ytsearch5:{query}")
-    add(f"ytsearch10:{query}")
+    add(f"ytsearch2:{query}")
 
+    artist, title = extract_artist_title(query)
     if artist and title:
-        base = f"{artist} {title}".strip()
-        add(f"ytsearch5:{base}")
-        add(f"ytsearch5:{base} official audio")
-        add(f"ytsearch5:{base} topic")
-        add(f"ytsearch5:{base} lyrics")
-        add(f"ytsearch5:{artist} - {title}")
-        add(f"ytsearch10:{base}")
+        add(f"ytsearch2:{artist} {title} official audio")
+        add(f"ytsearch2:{artist} {title} topic")
+
     else:
-        add(f"ytsearch5:{query} official audio")
-        add(f"ytsearch5:{query} topic")
-        add(f"ytsearch5:{query} lyrics")
-        add(f"ytsearch10:{query} audio")
+        add(f"ytsearch2:{query} official audio")
+        add(f"ytsearch2:{query} topic")
 
-    for guessed in guess_artist_song_candidates(query):
-        add(guessed)
-        add(f"ytsearch5:{guessed}")
-        add(f"ytsearch5:{guessed} official audio")
-
-    if normalized.endswith(" 노래"):
-        artist_only = normalized[:-3].strip()
-        for guessed in guess_artist_song_candidates(artist_only):
-            add(guessed)
-            add(f"ytsearch5:{guessed}")
-
-    # 최후 fallback
-    add(f"scsearch3:{query}")
-    if artist and title:
-        add(f"scsearch3:{artist} {title}")
-
-    return candidates[:20]
-
-
+    return candidates[:5]
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -560,16 +409,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if not entries:
                 continue
 
-            # 검색 품질 점수화
-            scored_entries = []
-            for entry in entries[:10]:
-                if not entry:
-                    continue
-                score = score_entry_for_query(entry, query)
-                scored_entries.append((score, entry))
-            scored_entries.sort(key=lambda item: item[0], reverse=True)
-
-            for _, entry in scored_entries[:5]:
+            for entry in entries[:3]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -603,76 +443,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
             raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
         raise ValueError("검색 결과가 없습니다.")
 
-
-
-
-def build_resolve_attempts(query: str):
-    attempts = []
-
-    def add(value: str):
-        value = (value or "").strip()
-        if value and value not in attempts:
-            attempts.append(value)
-
-    add(query)
-
-    artist, title = extract_artist_title(query)
-    if artist and title:
-        add(f"{artist} {title}")
-        add(f"{artist} {title} official audio")
-        add(f"{artist} {title} topic")
-    else:
-        add(f"{query} official audio")
-        add(f"{query} topic")
-        add(f"{query} lyrics")
-
-    for guessed in guess_artist_song_candidates(query):
-        add(guessed)
-
-    normalized = normalize_song_text(query)
-    if normalized.endswith(" 노래"):
-        artist_only = normalized[:-3].strip()
-        for guessed in guess_artist_song_candidates(artist_only):
-            add(guessed)
-
-    return attempts[:10]
-
-
-async def try_resolve_player_with_fallback(query: str):
-    attempted_queries = []
-    last_error = None
-
-    # 1차: Spotify 메타데이터로 영어/일본어 제목 재검색
-    spotify_hints = await get_multilingual_search_hints(query)
-    for candidate in spotify_hints:
-        attempted_queries.append(candidate)
-        try:
-            player = await YTDLSource.from_query(candidate)
-            return player, attempted_queries
-        except Exception as e:
-            last_error = e
-            if is_blocked_music_error(str(e)):
-                break
-
-    # 2차: 기존 유튜브 검색 후보
-    for candidate in build_resolve_attempts(query):
-        if candidate in attempted_queries:
-            continue
-        attempted_queries.append(candidate)
-        try:
-            player = await YTDLSource.from_query(candidate)
-            return player, attempted_queries
-        except Exception as e:
-            last_error = e
-            if is_blocked_music_error(str(e)):
-                break
-            continue
-
-    if last_error is not None:
-        raise last_error
-
-    player = await YTDLSource.from_query(query)
-    return player, attempted_queries or [query]
 
 # =========================
 # 파일 저장 / 불러오기
@@ -1864,7 +1634,6 @@ async def leave(ctx):
         await ctx.send("음성 채널에 없음")
 
 
-
 @bot.command(name="재생")
 async def play(ctx, *, query: str = None):
     guild_id = ctx.guild.id
@@ -1895,31 +1664,6 @@ async def play(ctx, *, query: str = None):
         for restored_query in restored_queue:
             queue.append((ctx, restored_query))
         state["restored_queue"] = []
-
-    if is_youtube_playlist_url(query):
-        try:
-            playlist_entries = await extract_playlist_entries(query)
-        except Exception as e:
-            await ctx.send(f"❌ 플레이리스트를 불러오지 못했어: {sanitize_music_error(e)}")
-            return
-
-        if not playlist_entries:
-            await ctx.send("플레이리스트 안에서 재생할 곡을 찾지 못했어")
-            return
-
-        added_queries = []
-        for _, entry_url in playlist_entries:
-            queue.append((ctx, entry_url))
-            added_queries.append(entry_url)
-
-        state["last_query"] = query
-        save_music_data()
-
-        await ctx.send(f"📃 플레이리스트 추가 완료: {len(added_queries)}곡", view=MusicView(ctx))
-
-        if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
-            await play_next(guild_id)
-        return
 
     queue.append((ctx, query))
     state["last_query"] = query
@@ -2067,16 +1811,6 @@ async def cookie_status(ctx):
             f"web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}"
         )
 
-
-
-
-
-@bot.command(name="스포티파이상태")
-async def spotify_status(ctx):
-    if spotify_is_enabled():
-        await ctx.send("✅ Spotify 검색 보조 사용 가능")
-    else:
-        await ctx.send("⚠️ Spotify 검색 보조가 꺼져 있어. SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET를 넣어줘.")
 
 @bot.command(name="음악상태")
 async def music_status(ctx):
