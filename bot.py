@@ -9,7 +9,6 @@ import yt_dlp
 import calendar
 import nacl  # PyNaCl import check
 import uuid
-import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
@@ -39,14 +38,6 @@ YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "tru
 YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true", "yes", "on")
 YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
-
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-
-spotify_token_cache = {
-    "access_token": None,
-    "expires_at": 0,
-}
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
@@ -160,9 +151,9 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "default_search": "ytsearch1",
     "skip_download": True,
-    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
-    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
-    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "20")),
+    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "2")),
+    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "2")),
+    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "10")),
     "nocheckcertificate": True,
     "geo_bypass": True,
     "youtube_include_dash_manifest": False,
@@ -173,7 +164,7 @@ YTDL_OPTIONS = {
     },
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "ios", "mweb"] if YTDLP_DISABLE_WEB_CLIENT else ["android", "ios", "mweb", "web_creator", "web"],
+            "player_client": ["ios"],
             "player_skip": ["webpage", "configs"]
         }
     },
@@ -220,113 +211,6 @@ def sanitize_music_error(error: Exception) -> str:
     if "no results" in lowered or "not found" in lowered:
         return "❌ 검색 결과를 찾지 못했어. 가수명이나 곡명을 더 정확하게 입력해줘!"
     return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
-
-
-def spotify_is_enabled() -> bool:
-    return bool(SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET)
-
-
-async def get_spotify_access_token():
-    if not spotify_is_enabled():
-        return None
-
-    now = int(time.time())
-    cached_token = spotify_token_cache.get("access_token")
-    expires_at = int(spotify_token_cache.get("expires_at") or 0)
-    if cached_token and now < expires_at - 30:
-        return cached_token
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://accounts.spotify.com/api/token",
-                data={"grant_type": "client_credentials"},
-                auth=aiohttp.BasicAuth(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET),
-                timeout=12,
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-    except Exception:
-        return None
-
-    access_token = data.get("access_token")
-    expires_in = int(data.get("expires_in") or 3600)
-    if not access_token:
-        return None
-
-    spotify_token_cache["access_token"] = access_token
-    spotify_token_cache["expires_at"] = now + expires_in
-    return access_token
-
-
-async def spotify_search_best_track(query: str):
-    if not spotify_is_enabled():
-        return None
-
-    token = await get_spotify_access_token()
-    if not token:
-        return None
-
-    try:
-        async with aiohttp.ClientSession(headers={
-            "Authorization": f"Bearer {token}"
-        }) as session:
-            async with session.get(
-                "https://api.spotify.com/v1/search",
-                params={
-                    "q": query,
-                    "type": "track",
-                    "limit": 3,
-                    "market": "KR",
-                },
-                timeout=12,
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-    except Exception:
-        return None
-
-    items = (((data or {}).get("tracks") or {}).get("items") or [])
-    if not items:
-        return None
-
-    def item_score(item):
-        score = int(item.get("popularity") or 0)
-        name = normalize_song_text(item.get("name", ""))
-        query_norm = normalize_song_text(query)
-        if query_norm and query_norm in name:
-            score += 15
-        return score
-
-    items.sort(key=item_score, reverse=True)
-    item = items[0]
-    artist_names = [a.get("name") for a in (item.get("artists") or []) if a.get("name")]
-    if not artist_names:
-        return None
-
-    artist = artist_names[0]
-    title = item.get("name") or query
-    return {
-        "artist": artist,
-        "title": title,
-        "display": f"{artist} - {title}",
-        "query": f"{artist} {title}",
-    }
-
-
-async def get_spotify_normalized_query(query: str):
-    if not query or is_youtube_playlist_url(query):
-        return None
-    if "youtube.com" in query or "youtu.be" in query:
-        return None
-
-    track = await spotify_search_best_track(query)
-    if not track:
-        return None
-
-    return track
 
 
 
@@ -474,9 +358,7 @@ def build_query_candidates(query: str):
         if value and value not in candidates:
             candidates.append(value)
 
-    normalized = normalize_song_text(query)
     artist, title = extract_artist_title(query)
-
     add(query)
     add(f"ytsearch2:{query}")
 
@@ -486,19 +368,12 @@ def build_query_candidates(query: str):
         add(f"ytsearch2:{base} topic")
     else:
         add(f"ytsearch2:{query} official audio")
-        add(f"ytsearch2:{query} topic")
 
     guessed = guess_artist_song_candidates(query)
     if guessed:
         add(f"ytsearch2:{guessed[0]}")
 
-    if normalized.endswith(" 노래"):
-        artist_only = normalized[:-3].strip()
-        guessed_artist = guess_artist_song_candidates(artist_only)
-        if guessed_artist:
-            add(f"ytsearch2:{guessed_artist[0]}")
-
-    return candidates[:5]
+    return candidates[:4]
 
 
 
@@ -550,7 +425,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 scored_entries.append((score, entry))
             scored_entries.sort(key=lambda item: item[0], reverse=True)
 
-            for _, entry in scored_entries[:2]:
+            for _, entry in scored_entries[:1]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -600,47 +475,21 @@ def build_resolve_attempts(query: str):
     artist, title = extract_artist_title(query)
     if artist and title:
         add(f"{artist} {title} official audio")
-        add(f"{artist} {title} topic")
     else:
         add(f"{query} official audio")
-        add(f"{query} topic")
         guessed = guess_artist_song_candidates(query)
         if guessed:
             add(guessed[0])
 
-    return attempts[:4]
+    return attempts[:3]
 
 
 async def try_resolve_player_with_fallback(query: str):
     attempted_queries = []
-    seen = set()
     last_error = None
 
-    def add_attempt(value: str):
-        value = (value or "").strip()
-        if value and value not in seen:
-            seen.add(value)
-            attempted_queries.append(value)
-
-    spotify_info = await get_spotify_normalized_query(query)
-    if spotify_info:
-        spotify_attempts = [
-            f"{spotify_info['artist']} {spotify_info['title']} official audio",
-            f"{spotify_info['artist']} {spotify_info['title']} topic",
-            f"{spotify_info['artist']} - {spotify_info['title']}",
-        ]
-        for candidate in spotify_attempts:
-            add_attempt(candidate)
-            try:
-                player = await YTDLSource.from_query(candidate)
-                return player, attempted_queries
-            except Exception as e:
-                last_error = e
-                if is_blocked_music_error(str(e)):
-                    raise e
-
     for candidate in build_resolve_attempts(query):
-        add_attempt(candidate)
+        attempted_queries.append(candidate)
         try:
             player = await YTDLSource.from_query(candidate)
             return player, attempted_queries
@@ -766,6 +615,72 @@ def extract_artist_title(song: str):
         artist, title = song.split(" - ", 1)
         return artist.strip(), title.strip()
     return None, song.strip()
+
+
+
+def infer_artist_from_text(song_text: str):
+    artist, _ = extract_artist_title(song_text or "")
+    if artist:
+        return artist
+
+    normalized = normalize_song_text(song_text or "")
+    if not normalized:
+        return None
+
+    alias_map = {
+        "iu": "아이유",
+        "bts": "방탄소년단",
+        "ive": "아이브",
+        "aespa": "에스파",
+        "newjeans": "뉴진스",
+        "blackpink": "블랙핑크",
+    }
+
+    for artist_key, songs in POPULAR_SONG_HINTS.items():
+        artist_name = alias_map.get(artist_key, artist_key)
+        for song in songs:
+            song_norm = normalize_song_text(song)
+            if normalized == song_norm or normalized in song_norm or song_norm in normalized:
+                return artist_name
+
+    return None
+
+
+def resolve_query_with_artist_context(state: dict, raw_query: str):
+    query = (raw_query or "").strip()
+    if not query:
+        return query, None
+
+    # 이미 가수가 포함된 입력은 그대로 사용
+    if " - " in query:
+        return query, None
+
+    normalized = normalize_song_text(query)
+    if normalized.endswith(" 노래") or normalized.endswith(" 노래 추천"):
+        return query, None
+
+    candidates = []
+
+    current = state.get("current") or {}
+    for value in [
+        current.get("query"),
+        current.get("title"),
+        state.get("last_query"),
+    ]:
+        if value and value not in candidates:
+            candidates.append(value)
+
+    context_artist = None
+    for value in candidates:
+        context_artist = infer_artist_from_text(value)
+        if context_artist:
+            break
+
+    if not context_artist:
+        return query, None
+
+    combined_query = f"{context_artist} - {query}"
+    return combined_query, context_artist
 
 
 def get_month_schedule_map(year: int, month: int):
@@ -1861,6 +1776,12 @@ async def play(ctx, *, query: str = None):
             await ctx.send("재생할 노래를 먼저 입력해줘")
             return
 
+    original_query = query
+    query, inferred_artist = resolve_query_with_artist_context(state, query)
+    if inferred_artist:
+        await ctx.send(f"🎯 이전 가수 기준으로 검색할게: **{inferred_artist} - {original_query}**")
+
+
     if ctx.voice_client is None:
         if ctx.author.voice is None:
             await ctx.send("음성 채널 먼저 들어가줘")
@@ -2050,15 +1971,6 @@ async def cookie_status(ctx):
         )
 
 
-
-
-
-@bot.command(name="스포티파이상태")
-async def spotify_status(ctx):
-    if spotify_is_enabled():
-        await ctx.send("✅ Spotify 검색 보조 사용 가능")
-    else:
-        await ctx.send("⚠️ Spotify 검색 보조가 꺼져 있어. SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET를 넣어줘.")
 
 @bot.command(name="음악상태")
 async def music_status(ctx):
