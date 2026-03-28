@@ -626,8 +626,6 @@ def get_font(size: int):
     except Exception as e:
         print(f"[폰트 오류] {e}")
         return ImageFont.load_default()
-    return ImageFont.load_default()
-
 
 def safe_text(text: str, limit: int):
     return text if len(text) <= limit else text[:limit]
@@ -914,12 +912,12 @@ def create_calendar_image(year: int, month: int):
     today_fill = (250, 247, 248)
     section_bg = (236, 234, 239)
 
-    title_font = get_font(42)
-    header_font = get_font(18)
-    day_font = get_font(20)
-    schedule_font = get_font(15)
-    bottom_title_font = get_font(18)
-    bottom_text_font = get_font(15)
+    title_font = get_font(36)
+    header_font = get_font(16)
+    day_font = get_font(16)
+    schedule_font = get_font(13)
+    bottom_title_font = get_font(16)
+    bottom_text_font = get_font(13)
 
     card_x1, card_y1, card_x2, card_y2 = 55, 40, 1045, 1210
     draw.rounded_rectangle((card_x1, card_y1, card_x2, card_y2), radius=28, fill=card_bg, outline=card_outline, width=3)
@@ -928,7 +926,7 @@ def create_calendar_image(year: int, month: int):
     title = f"{year}년 {month:02d}월"
     bbox = draw.textbbox((0, 0), title, font=title_font)
     title_w = bbox[2] - bbox[0]
-    draw.text(((width - title_w) / 2, 90), title, fill=title_color, font=title_font)
+    draw.text(((width - title_w) / 2, 78), title, fill=title_color, font=title_font)
 
     days = ["월", "화", "수", "목", "금", "토", "일"]
     grid_left = 105
@@ -947,7 +945,7 @@ def create_calendar_image(year: int, month: int):
 
         bbox = draw.textbbox((0, 0), day_name, font=header_font)
         tw = bbox[2] - bbox[0]
-        draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 170), day_name, fill=color, font=header_font)
+        draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 160), day_name, fill=color, font=header_font)
 
     cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(year, month)
@@ -977,7 +975,7 @@ def create_calendar_image(year: int, month: int):
             if is_current_month and day_num == now.day:
                 draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=today_fill, outline=today_outline, width=4)
 
-            draw.text((x1 + 14, y1 + 10), str(day_num), fill=day_color, font=day_font)
+            draw.text((x1 + 12, y1 + 10), str(day_num), fill=day_color, font=day_font)
 
             items = date_map.get(day_num, [])
             preview_y = y1 + 40
