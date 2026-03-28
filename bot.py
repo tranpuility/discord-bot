@@ -695,6 +695,7 @@ def save_music_data():
         data[str(guild_id)] = {
             "last_query": state.get("last_query") or current_query,
             "last_voice_channel_id": state.get("last_voice_channel_id"),
+            "last_text_channel_id": state.get("last_text_channel_id"),
             "repeat": state.get("repeat", False),
             "history": [item for item in state.get("history", []) if isinstance(item, str)][-20:],
             "current_query": current_query,
@@ -728,6 +729,7 @@ def load_music_data():
         state = get_music_state(guild_id)
         state["last_query"] = saved.get("last_query") or saved.get("current_query")
         state["last_voice_channel_id"] = saved.get("last_voice_channel_id")
+        state["last_text_channel_id"] = saved.get("last_text_channel_id")
         state["repeat"] = bool(saved.get("repeat", False))
         state["history"] = [item for item in saved.get("history", []) if isinstance(item, str)][-20:]
         state["restored_queue"] = [item for item in saved.get("queue", []) if isinstance(item, str)]
@@ -788,6 +790,7 @@ def get_music_state(guild_id: int):
             "history": [],
             "last_query": None,
             "last_voice_channel_id": None,
+            "last_text_channel_id": None,
             "restored_queue": [],
             "fail_count": 0,
             "blocked_fail_count": 0,
@@ -920,61 +923,58 @@ async def check_schedule():
 async def play_next(guild_id: int):
     queue = get_guild_queue(guild_id)
     state = get_music_state(guild_id)
+    guild = bot.get_guild(guild_id)
+
+    if guild is None:
+        state["current"] = None
+        save_music_data()
+        return
+
+    player = guild.voice_client if isinstance(guild.voice_client, wavelink.Player) else None
 
     if not queue:
         state["current"] = None
         save_music_data()
         return
 
-    ctx, query = queue.pop(0)
+    channel_id, query = unpack_queue_item(queue.pop(0))
+    text_channel = get_text_channel_from_id(channel_id)
 
-    if ctx.voice_client is None:
+    if channel_id:
+        state["last_text_channel_id"] = channel_id
+
+    if player is None:
         state["current"] = None
         save_music_data()
         return
 
     try:
-        player, attempted_queries = await try_resolve_player_with_fallback(query)
+        track, matched_query = await search_lavalink_track(query)
 
         state["current"] = {
-            "title": player.title,
+            "title": getattr(track, "title", query),
             "query": query,
-            "url": player.webpage_url or player.original_url
+            "url": getattr(track, "uri", None)
         }
         state["last_query"] = query
         state["fail_count"] = 0
-        if ctx.voice_client and ctx.voice_client.channel:
-            state["last_voice_channel_id"] = ctx.voice_client.channel.id
+        if getattr(player, "channel", None):
+            state["last_voice_channel_id"] = player.channel.id
         state["restored_queue"] = [saved_query for _, saved_query in queue if isinstance(saved_query, str)]
         save_music_data()
 
-        def after_play(error):
-            if error:
-                print(f"재생 후 오류: {error}")
-
-            if state["current"]:
-                if state["repeat"]:
-                    queue.insert(0, (ctx, state["current"]["query"]))
-                else:
-                    state["history"].append(state["current"]["query"])
-
-            future = asyncio.run_coroutine_threadsafe(play_next(guild_id), bot.loop)
-            try:
-                future.result()
-            except Exception as e:
-                print(f"다음 곡 처리 오류: {e}")
-
-        ctx.voice_client.play(player, after=after_play)
+        await player.play(track)
 
         extra_line = ""
-        if len(attempted_queries) > 1:
-            extra_line = f"\n검색 보정: {len(attempted_queries)}개 후보 중 성공"
+        if matched_query != query:
+            extra_line = f"\n검색 보정: `{matched_query}`"
 
-        await ctx.send(
-            f"🎵 재생 중: **{player.title}**\n"
-            f"대기열: {len(queue)}곡{extra_line}",
-            view=MusicView(ctx)
-        )
+        if text_channel:
+            await text_channel.send(
+                f"🎵 재생 중: **{getattr(track, 'title', query)}**\n"
+                f"대기열: {len(queue)}곡{extra_line}",
+                view=MusicView(guild_id)
+            )
 
     except Exception as e:
         error_text = str(e)
@@ -988,23 +988,25 @@ async def play_next(guild_id: int):
         save_music_data()
 
         if queue:
-            if is_blocked_music_error(error_text):
-                await ctx.send(
-                    f"⚠️ `{query}` 재생 실패 → 유튜브 차단/제한으로 보여서 자동 스킵할게\n"
-                    f"남은 대기열 {len(queue)}곡 계속 시도해볼게"
-                )
-            else:
-                await ctx.send(f"⚠️ `{query}` 재생 실패 → 자동으로 다음 곡으로 넘어갈게")
+            if text_channel:
+                if is_blocked_music_error(error_text):
+                    await text_channel.send(
+                        f"⚠️ `{query}` 재생 실패 → 유튜브 차단/제한으로 보여서 자동 스킵할게\n"
+                        f"남은 대기열 {len(queue)}곡 계속 시도해볼게"
+                    )
+                else:
+                    await text_channel.send(f"⚠️ `{query}` 재생 실패 → 자동으로 다음 곡으로 넘어갈게")
             await asyncio.sleep(1)
             await play_next(guild_id)
         else:
-            if is_blocked_music_error(error_text):
-                await ctx.send(
-                    "⚠️ 마지막 곡도 유튜브 차단 때문에 실패했어.\n"
-                    "지금은 자동 스킵할 곡도 없어서 정지할게. cookies.txt 적용하면 훨씬 안정적이야."
-                )
-            else:
-                await ctx.send(f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
+            if text_channel:
+                if is_blocked_music_error(error_text):
+                    await text_channel.send(
+                        "⚠️ 마지막 곡도 유튜브 차단 때문에 실패했어.\n"
+                        "지금은 자동 스킵할 곡도 없어서 정지할게. cookies.txt 적용하면 훨씬 안정적이야."
+                    )
+                else:
+                    await text_channel.send(f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
 
 
 # =========================
