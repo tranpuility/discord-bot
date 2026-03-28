@@ -7,6 +7,7 @@ import sys
 import asyncio
 import aiohttp
 import yt_dlp
+import wavelink
 import calendar
 import uuid
 from datetime import datetime, timedelta
@@ -52,6 +53,139 @@ intents.voice_states = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+
+def make_queue_item(channel_id: int | None, query: str):
+    return (channel_id, query)
+
+
+def unpack_queue_item(item):
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        return item[0], item[1]
+    return None, None
+
+
+def get_text_channel_from_id(channel_id: int | None):
+    if not channel_id:
+        return None
+    return bot.get_channel(channel_id)
+
+
+async def send_music_message(guild_id: int, text: str, *, view=None):
+    state = get_music_state(guild_id)
+    channel = get_text_channel_from_id(state.get("last_text_channel_id"))
+    if channel:
+        try:
+            await channel.send(text, view=view)
+        except Exception as e:
+            print(f"음악 메시지 전송 실패: {e}")
+
+
+async def ensure_lavalink_ready():
+    if getattr(bot, "_lavalink_connected", False):
+        return
+
+    host = os.getenv("LAVALINK_HOST")
+    port = int(os.getenv("LAVALINK_PORT", "2333"))
+    password = os.getenv("LAVALINK_PASSWORD")
+    secure = os.getenv("LAVALINK_SECURE", "false").lower() in ("1", "true", "yes", "on")
+
+    if not host or not password:
+        raise RuntimeError("LAVALINK_HOST 또는 LAVALINK_PASSWORD 환경변수가 비어 있습니다.")
+
+    if not wavelink.Pool.nodes:
+        scheme = "https" if secure else "http"
+        node = wavelink.Node(uri=f"{scheme}://{host}:{port}", password=password)
+        await wavelink.Pool.connect(nodes=[node], client=bot)
+
+    bot._lavalink_connected = True
+
+
+def resolve_voice_client(ctx):
+    vc = ctx.voice_client
+    return vc if isinstance(vc, wavelink.Player) else None
+
+
+def player_is_playing(player) -> bool:
+    if not player:
+        return False
+    value = getattr(player, "playing", None)
+    if value is not None:
+        return bool(value)
+    checker = getattr(player, "is_playing", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+    return False
+
+
+def player_is_paused(player) -> bool:
+    if not player:
+        return False
+    value = getattr(player, "paused", None)
+    if value is not None:
+        return bool(value)
+    checker = getattr(player, "is_paused", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+    return False
+
+
+async def get_or_connect_player(ctx):
+    await ensure_lavalink_ready()
+
+    if ctx.author.voice is None or ctx.author.voice.channel is None:
+        raise ValueError("음성 채널 먼저 들어가줘")
+
+    channel = ctx.author.voice.channel
+    player = resolve_voice_client(ctx)
+
+    if player is None:
+        player = await channel.connect(cls=wavelink.Player)
+    elif player.channel != channel:
+        await player.move_to(channel)
+
+    state = get_music_state(ctx.guild.id)
+    state["last_voice_channel_id"] = channel.id
+    state["last_text_channel_id"] = ctx.channel.id
+    save_music_data()
+    return player
+
+
+async def search_lavalink_track(query: str):
+    candidates = build_query_candidates(query)
+    last_error = None
+
+    for candidate in candidates:
+        target = candidate
+        if not target.startswith(("http://", "https://", "ytsearch:", "ytmsearch:", "scsearch:")):
+            target = f"ytsearch:{target}"
+
+        try:
+            result = await wavelink.Playable.search(target)
+        except Exception as e:
+            last_error = e
+            continue
+
+        if result:
+            # Playable.search may return Search object or list
+            tracks = getattr(result, "tracks", result)
+            try:
+                tracks = list(tracks)
+            except Exception:
+                tracks = []
+            if tracks:
+                return tracks[0], candidate
+
+    if last_error is not None:
+        raise ValueError(f"Lavalink 검색 실패: {last_error}")
+    raise ValueError("검색 결과가 없습니다.")
 
 RESTARTING = False
 
