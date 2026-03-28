@@ -1,2 +1,7 @@
 Wavelink==2.6.5
 yt-dlp
+PyNaCl
+discord.py
+python-dotenv
+aiohttp
+Pillow
