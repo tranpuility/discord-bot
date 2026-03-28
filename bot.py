@@ -41,7 +41,7 @@ YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower(
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
-FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
+FONT_FILE = os.path.join(BASE_DIR, '온글잎 박다현체.ttf')
 
 # =========================
 # 기본 설정
@@ -620,12 +620,29 @@ def load_music_data():
 # =========================
 # 공통 유틸
 # =========================
+def resolve_font_path():
+    candidates = [
+        FONT_FILE,
+        os.path.join(os.getcwd(), "온글잎 박다현체.ttf"),
+        os.path.join("/mnt/data", "온글잎 박다현체.ttf"),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
 def get_font(size: int):
-    try:
-        return ImageFont.truetype(FONT_FILE, size)
-    except Exception as e:
-        print(f"[폰트 오류] {e}")
-        return ImageFont.load_default()
+    font_path = resolve_font_path()
+    if font_path:
+        try:
+            return ImageFont.truetype(font_path, size=size)
+        except Exception as e:
+            print(f"[폰트 오류] {font_path} | {e}")
+    else:
+        print("[폰트 오류] 온글잎 박다현체.ttf 파일을 찾지 못함")
+    return ImageFont.load_default()
+
 
 def safe_text(text: str, limit: int):
     return text if len(text) <= limit else text[:limit]
@@ -978,7 +995,7 @@ def create_calendar_image(year: int, month: int):
             draw.text((x1 + 12, y1 + 10), str(day_num), fill=day_color, font=day_font)
 
             items = date_map.get(day_num, [])
-            preview_y = y1 + 40
+            preview_y = y1 + 38
 
             for idx, item in enumerate(items[:2]):
                 preview = safe_text(item["text"], 9)
