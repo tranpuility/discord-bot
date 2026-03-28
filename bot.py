@@ -157,7 +157,7 @@ async def get_or_connect_player(ctx):
         player = None
 
     if player is None:
-        player = await channel.connect(cls=wavelink.Player, self_deaf=True)
+        player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
     elif player.channel != channel:
         await player.move_to(channel)
 
@@ -1722,7 +1722,7 @@ async def on_ready():
                             if voice_channel and getattr(voice_channel, "connect", None):
                                 try:
                                     if guild.voice_client is None:
-                                        await voice_channel.connect(cls=wavelink.Player, self_deaf=True)
+                                        await voice_channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
                                     else:
                                         player = guild.voice_client
                                         if isinstance(player, wavelink.Player):
@@ -1875,7 +1875,7 @@ async def join(ctx):
                     pass
         player = resolve_voice_client(ctx)
         if player is None:
-            await channel.connect(cls=wavelink.Player, self_deaf=True)
+            await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
         else:
             await player.move_to(channel)
 
