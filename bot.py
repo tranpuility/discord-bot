@@ -82,9 +82,6 @@ async def send_music_message(guild_id: int, text: str, *, view=None):
 
 
 async def ensure_lavalink_ready():
-    if getattr(bot, "_lavalink_connected", False):
-        return
-
     host = os.getenv("LAVALINK_HOST")
     port = int(os.getenv("LAVALINK_PORT", "2333"))
     password = os.getenv("LAVALINK_PASSWORD")
@@ -93,17 +90,37 @@ async def ensure_lavalink_ready():
     if not host or not password:
         raise RuntimeError("LAVALINK_HOST 또는 LAVALINK_PASSWORD 환경변수가 비어 있습니다.")
 
-    if not wavelink.Pool.nodes:
+    if not getattr(wavelink.Pool, "nodes", None):
         scheme = "https" if secure else "http"
         node = wavelink.Node(uri=f"{scheme}://{host}:{port}", password=password)
         await wavelink.Pool.connect(nodes=[node], client=bot)
+        print(f"[LAVALINK] connected host={host} port={port} secure={secure}")
 
     bot._lavalink_connected = True
-
 
 def resolve_voice_client(ctx):
     vc = ctx.voice_client
     return vc if isinstance(vc, wavelink.Player) else None
+
+async def hard_reset_voice(guild):
+    vc = guild.voice_client if guild else None
+    if vc is None:
+        return
+    try:
+        if isinstance(vc, wavelink.Player):
+            try:
+                await vc.stop()
+            except Exception:
+                pass
+            await vc.disconnect(force=True)
+        else:
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                await vc.disconnect()
+    except Exception as e:
+        print(f"[VOICE] force disconnect failed: {e}")
+    await asyncio.sleep(1.2)
 
 
 def player_is_playing(player) -> bool:
@@ -154,30 +171,26 @@ async def get_or_connect_player(ctx):
                 await existing_vc.disconnect()
             except Exception:
                 pass
+        await asyncio.sleep(1.2)
         player = None
 
     if player is None:
         player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+        try:
+            await player.set_volume(100)
+        except Exception:
+            pass
+        print(f"[VOICE] joined guild={ctx.guild.id} channel={channel.id}")
     elif player.channel != channel:
         await player.move_to(channel)
-
-    try:
-        await player.set_volume(100)
-    except Exception as e:
-        print(f"볼륨 설정 실패: {e}")
-
-    try:
-        await player.pause(False)
-    except Exception:
-        pass
+        print(f"[VOICE] moved guild={ctx.guild.id} channel={channel.id}")
 
     state = get_music_state(ctx.guild.id)
     state["last_voice_channel_id"] = channel.id
     state["last_text_channel_id"] = ctx.channel.id
     save_music_data()
-
-    print(f"[VOICE] guild={ctx.guild.id} channel={channel.id} player_connected={player is not None}")
     return player
+
 
 async def search_lavalink_track(query: str):
     candidates = build_query_candidates(query)
@@ -1004,11 +1017,13 @@ async def play_next(guild_id: int):
         state["restored_queue"] = [saved_query for _, saved_query in (unpack_queue_item(item) for item in queue) if isinstance(saved_query, str)]
         save_music_data()
 
-        await player.play(track)
         try:
             await player.set_volume(100)
-        except Exception as e:
-            print(f"재생 후 볼륨 설정 실패: {e}")
+        except Exception:
+            pass
+
+        await player.play(track)
+        print(f"[TRACK] play requested guild={guild_id}")
 
         extra_line = ""
         if matched_query != query:
@@ -1036,6 +1051,10 @@ async def play_next(guild_id: int):
         else:
             await send_music_message(guild_id, f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
 
+
+# =========================
+# 캘린더 이미지 생성
+# =========================
 def create_calendar_image(year: int, month: int):
     width, height = 1100, 1300
     image = Image.new("RGB", (width, height), (20, 20, 24))
@@ -1677,49 +1696,6 @@ class MusicView(discord.ui.View):
 # 이벤트
 # =========================
 @bot.event
-async def on_wavelink_node_ready(payload):
-    print(f"[LAVALINK] node ready: {getattr(payload.node, 'identifier', 'default')}")
-
-@bot.event
-async def on_wavelink_track_start(payload):
-    player = payload.player
-    track = payload.track
-    print(f"[LAVALINK] track start guild={getattr(player.guild, 'id', None)} title={getattr(track, 'title', None)}")
-
-@bot.event
-async def on_wavelink_track_end(payload):
-    player = payload.player
-    guild = getattr(player, "guild", None)
-    guild_id = getattr(guild, "id", None)
-    print(f"[LAVALINK] track end guild={guild_id} reason={getattr(payload, 'reason', None)}")
-    if guild_id is None:
-        return
-    state = get_music_state(guild_id)
-    queue = get_guild_queue(guild_id)
-    if state.get("current") and state["current"].get("query"):
-        current_query = state["current"]["query"]
-        if state.get("repeat"):
-            queue.insert(0, make_queue_item(state.get("last_text_channel_id"), current_query))
-        else:
-            state["history"].append(current_query)
-    state["current"] = None
-    save_music_data()
-    if queue:
-        await play_next(guild_id)
-
-@bot.event
-async def on_wavelink_track_exception(payload):
-    player = payload.player
-    guild_id = getattr(getattr(player, "guild", None), "id", None)
-    print(f"[LAVALINK] track exception guild={guild_id} exception={getattr(payload, 'exception', None)}")
-
-@bot.event
-async def on_wavelink_track_stuck(payload):
-    player = payload.player
-    guild_id = getattr(getattr(player, "guild", None), "id", None)
-    print(f"[LAVALINK] track stuck guild={guild_id} threshold={getattr(payload, 'threshold', None)}")
-
-@bot.event
 async def on_ready():
     global schedule_task_started
     print(f"로그인 완료: {bot.user}")
@@ -1738,7 +1714,6 @@ async def on_ready():
         print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
 
         await ensure_lavalink_ready()
-        print(f"[LAVALINK] host={LAVALINK_HOST} port={LAVALINK_PORT} secure={LAVALINK_SECURE}")
 
         if os.path.exists(RESTART_FILE):
             try:
@@ -1814,6 +1789,19 @@ async def on_message(message):
 
 
 @bot.event
+async def on_wavelink_node_ready(payload):
+    node = getattr(payload, "node", None)
+    identifier = getattr(node, "identifier", "unknown")
+    print(f"[LAVALINK] node ready: {identifier}")
+
+@bot.event
+async def on_wavelink_track_start(payload):
+    player = getattr(payload, "player", None)
+    track = getattr(payload, "track", None) or getattr(payload, "original", None)
+    guild_id = getattr(getattr(player, "guild", None), "id", None)
+    print(f"[LAVALINK] track start guild={guild_id} title={getattr(track, 'title', None)}")
+
+@bot.event
 async def on_wavelink_track_end(payload):
     player = getattr(payload, "player", None)
     if not player or not getattr(player, "guild", None):
@@ -1832,8 +1820,8 @@ async def on_wavelink_track_end(payload):
 
     state["current"] = None
     save_music_data()
+    print(f"[LAVALINK] track end guild={guild_id} reason={getattr(payload, 'reason', None)}")
     await play_next(guild_id)
-
 
 @bot.event
 async def on_wavelink_track_exception(payload):
@@ -1841,9 +1829,15 @@ async def on_wavelink_track_exception(payload):
     if not player or not getattr(player, "guild", None):
         return
     guild_id = player.guild.id
+    print(f"[LAVALINK] track exception guild={guild_id} exception={getattr(payload, 'exception', None)}")
     await send_music_message(guild_id, "⚠️ 재생 중 오류가 발생해서 다음 곡으로 넘어갈게")
     await play_next(guild_id)
 
+@bot.event
+async def on_wavelink_track_stuck(payload):
+    player = getattr(payload, "player", None)
+    guild_id = getattr(getattr(player, "guild", None), "id", None)
+    print(f"[LAVALINK] track stuck guild={guild_id} threshold={getattr(payload, 'threshold', None)}")
 
 # =========================
 # 음악 명령어
@@ -1918,28 +1912,13 @@ async def join(ctx):
     channel = ctx.author.voice.channel
 
     try:
-        await ensure_lavalink_ready()
-        existing_vc = ctx.voice_client
-        player = resolve_voice_client(ctx)
-        if existing_vc is not None and player is None:
-            try:
-                await existing_vc.disconnect(force=True)
-            except Exception:
-                try:
-                    await existing_vc.disconnect()
-                except Exception:
-                    pass
-        player = resolve_voice_client(ctx)
-        if player is None:
-            await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-        else:
-            await player.move_to(channel)
+        if ctx.guild.voice_client is not None:
+            current = ctx.guild.voice_client
+            current_channel = getattr(current, "channel", None)
+            if current_channel is None or current_channel.id != channel.id:
+                await hard_reset_voice(ctx.guild)
 
-        state = get_music_state(ctx.guild.id)
-        state["last_voice_channel_id"] = channel.id
-        state["last_text_channel_id"] = ctx.channel.id
-        save_music_data()
-
+        await get_or_connect_player(ctx)
         await ctx.send(f"✅ {channel.name} 입장 완료")
 
     except Exception as e:
@@ -1959,10 +1938,10 @@ async def leave(ctx):
         state["history"] = []
         state["repeat"] = False
         state["restored_queue"] = []
+        state["last_text_channel_id"] = ctx.channel.id
         save_music_data()
 
-        player = resolve_voice_client(ctx) or ctx.voice_client
-        await player.disconnect()
+        await hard_reset_voice(ctx.guild)
         await ctx.send("👋 퇴장 완료")
     else:
         await ctx.send("음성 채널에 없음")
