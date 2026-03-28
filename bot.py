@@ -2774,6 +2774,127 @@ async def on_wavelink_track_stuck(payload):
     if guild:
         await send_music_message(guild.id, "⚠️ 노래가 멈춰서 다음 곡으로 넘어갈게")
         await play_next(guild.id)
+# 음악 명령어
+# =========================
+@bot.command(name="재시동")
+@commands.is_owner()
+async def restart(ctx):
+    global RESTARTING
+
+    if RESTARTING:
+        return
+
+    RESTARTING = True
+    restart_msg = await ctx.send("🔄 봇 재시작 중...")
+
+    guild_id = ctx.guild.id if ctx.guild else None
+    voice_channel_id = None
+    last_query = None
+    queue_data = []
+    repeat_state = False
+
+    if guild_id:
+        state = get_music_state(guild_id)
+        repeat_state = state.get("repeat", False)
+        last_query = state.get("last_query")
+
+        current = state.get("current")
+        if current and not last_query:
+            last_query = current.get("query")
+
+        queue = get_guild_queue(guild_id)
+        queue_data = [query for _, query in (unpack_queue_item(item) for item in queue) if isinstance(query, str)]
+
+        if ctx.voice_client and ctx.voice_client.channel:
+            voice_channel_id = ctx.voice_client.channel.id
+        elif state.get("last_voice_channel_id"):
+            voice_channel_id = state.get("last_voice_channel_id")
+
+    try:
+        with open(RESTART_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "channel_id": ctx.channel.id,
+                "message_id": restart_msg.id,
+                "guild_id": guild_id,
+                "voice_channel_id": voice_channel_id,
+                "last_query": last_query,
+                "queue": queue_data,
+                "repeat": repeat_state
+            }, f)
+    except Exception as e:
+        print(f"재시작 채널 저장 실패: {e}")
+
+    save_music_data()
+
+    try:
+        if ctx.voice_client:
+            player = resolve_voice_client(ctx) or ctx.voice_client
+            await player.disconnect()
+    except Exception:
+        pass
+
+    await bot.close()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+@bot.command(name="입장")
+async def join(ctx):
+    if ctx.author.voice is None:
+        await ctx.send("먼저 음성 채널에 들어가 있어야 해.")
+        return
+
+    channel = ctx.author.voice.channel
+
+    try:
+        await ensure_lavalink_ready()
+        existing_vc = ctx.voice_client
+        player = resolve_voice_client(ctx)
+        if existing_vc is not None and player is None:
+            try:
+                await existing_vc.disconnect(force=True)
+            except Exception:
+                try:
+                    await existing_vc.disconnect()
+                except Exception:
+                    pass
+        player = resolve_voice_client(ctx)
+        if player is None:
+            await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+        else:
+            await player.move_to(channel)
+
+        state = get_music_state(ctx.guild.id)
+        state["last_voice_channel_id"] = channel.id
+        state["last_text_channel_id"] = ctx.channel.id
+        save_music_data()
+
+        await ctx.send(f"✅ {channel.name} 입장 완료")
+
+    except Exception as e:
+        await ctx.send(f"❌ 입장 실패: {e}")
+
+
+@bot.command(name="퇴장")
+async def leave(ctx):
+    if ctx.voice_client:
+        guild_id = ctx.guild.id
+        music_queues[guild_id] = []
+
+        state = get_music_state(guild_id)
+        if state.get("current") and state["current"].get("query"):
+            state["last_query"] = state["current"]["query"]
+        state["current"] = None
+        state["history"] = []
+        state["repeat"] = False
+        state["restored_queue"] = []
+        save_music_data()
+
+        player = resolve_voice_client(ctx) or ctx.voice_client
+        await player.disconnect()
+        await ctx.send("👋 퇴장 완료")
+    else:
+        await ctx.send("음성 채널에 없음")
+
 
 @bot.command(name="재생")
 async def play(ctx, *, query: str = None):
