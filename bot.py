@@ -1,4 +1,4 @@
-# version: 2026-03-29-wavelink-join-unmute-compiled
+# version: 2026-03-28-cookieless-workaround
 import discord
 from discord.ext import commands
 import json
@@ -161,12 +161,23 @@ async def get_or_connect_player(ctx):
     elif player.channel != channel:
         await player.move_to(channel)
 
+    try:
+        await player.set_volume(100)
+    except Exception as e:
+        print(f"볼륨 설정 실패: {e}")
+
+    try:
+        await player.pause(False)
+    except Exception:
+        pass
+
     state = get_music_state(ctx.guild.id)
     state["last_voice_channel_id"] = channel.id
     state["last_text_channel_id"] = ctx.channel.id
     save_music_data()
-    return player
 
+    print(f"[VOICE] guild={ctx.guild.id} channel={channel.id} player_connected={player is not None}")
+    return player
 
 async def search_lavalink_track(query: str):
     candidates = build_query_candidates(query)
@@ -979,6 +990,7 @@ async def play_next(guild_id: int):
 
     try:
         track, matched_query = await search_lavalink_track(query)
+        print(f"[TRACK] selected title={getattr(track, 'title', None)} uri={getattr(track, 'uri', None)} author={getattr(track, 'author', None)}")
 
         state["current"] = {
             "title": getattr(track, "title", query),
@@ -993,6 +1005,10 @@ async def play_next(guild_id: int):
         save_music_data()
 
         await player.play(track)
+        try:
+            await player.set_volume(100)
+        except Exception as e:
+            print(f"재생 후 볼륨 설정 실패: {e}")
 
         extra_line = ""
         if matched_query != query:
@@ -1020,10 +1036,6 @@ async def play_next(guild_id: int):
         else:
             await send_music_message(guild_id, f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
 
-
-# =========================
-# 캘린더 이미지 생성
-# =========================
 def create_calendar_image(year: int, month: int):
     width, height = 1100, 1300
     image = Image.new("RGB", (width, height), (20, 20, 24))
@@ -1665,6 +1677,49 @@ class MusicView(discord.ui.View):
 # 이벤트
 # =========================
 @bot.event
+async def on_wavelink_node_ready(payload):
+    print(f"[LAVALINK] node ready: {getattr(payload.node, 'identifier', 'default')}")
+
+@bot.event
+async def on_wavelink_track_start(payload):
+    player = payload.player
+    track = payload.track
+    print(f"[LAVALINK] track start guild={getattr(player.guild, 'id', None)} title={getattr(track, 'title', None)}")
+
+@bot.event
+async def on_wavelink_track_end(payload):
+    player = payload.player
+    guild = getattr(player, "guild", None)
+    guild_id = getattr(guild, "id", None)
+    print(f"[LAVALINK] track end guild={guild_id} reason={getattr(payload, 'reason', None)}")
+    if guild_id is None:
+        return
+    state = get_music_state(guild_id)
+    queue = get_guild_queue(guild_id)
+    if state.get("current") and state["current"].get("query"):
+        current_query = state["current"]["query"]
+        if state.get("repeat"):
+            queue.insert(0, make_queue_item(state.get("last_text_channel_id"), current_query))
+        else:
+            state["history"].append(current_query)
+    state["current"] = None
+    save_music_data()
+    if queue:
+        await play_next(guild_id)
+
+@bot.event
+async def on_wavelink_track_exception(payload):
+    player = payload.player
+    guild_id = getattr(getattr(player, "guild", None), "id", None)
+    print(f"[LAVALINK] track exception guild={guild_id} exception={getattr(payload, 'exception', None)}")
+
+@bot.event
+async def on_wavelink_track_stuck(payload):
+    player = payload.player
+    guild_id = getattr(getattr(player, "guild", None), "id", None)
+    print(f"[LAVALINK] track stuck guild={guild_id} threshold={getattr(payload, 'threshold', None)}")
+
+@bot.event
 async def on_ready():
     global schedule_task_started
     print(f"로그인 완료: {bot.user}")
@@ -1683,6 +1738,7 @@ async def on_ready():
         print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
 
         await ensure_lavalink_ready()
+        print(f"[LAVALINK] host={LAVALINK_HOST} port={LAVALINK_PORT} secure={LAVALINK_SECURE}")
 
         if os.path.exists(RESTART_FILE):
             try:
