@@ -1,7 +1,7 @@
-Wavelink==2.6.5
+discord.py
+wavelink>=3.4,<4
 yt-dlp
 PyNaCl
-discord.py
 python-dotenv
 aiohttp
 Pillow
