@@ -1,3 +1,4 @@
+# version: 2026-03-28-cookieless-workaround
 import discord
 from discord.ext import commands
 import json
@@ -6,9 +7,10 @@ import sys
 import asyncio
 import aiohttp
 import yt_dlp
+import wavelink
 import calendar
-import nacl  # PyNaCl import check
 import uuid
+import unicodedata
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
@@ -34,14 +36,14 @@ if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
 YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
-YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "true").lower() in ("1", "true", "yes", "on")
+YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "false").lower() in ("1", "true", "yes", "on")
 YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true", "yes", "on")
 YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
-FONT_FILE = os.path.join(BASE_DIR, '온글잎 박다현체.ttf')
+FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
 
 # =========================
 # 기본 설정
@@ -52,6 +54,172 @@ intents.voice_states = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+def make_queue_item(channel_id: int | None, query: str):
+    return (channel_id, query)
+
+
+def unpack_queue_item(item):
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        return item[0], item[1]
+    return None, None
+
+
+def get_text_channel_from_id(channel_id: int | None):
+    if not channel_id:
+        return None
+    return bot.get_channel(channel_id)
+
+
+async def send_music_message(guild_id: int, text: str, *, view=None):
+    state = get_music_state(guild_id)
+    channel = get_text_channel_from_id(state.get("last_text_channel_id"))
+    if channel:
+        try:
+            await channel.send(text, view=view)
+        except Exception as e:
+            print(f"음악 메시지 전송 실패: {e}")
+
+
+async def ensure_lavalink_ready():
+    if getattr(bot, "_lavalink_connected", False):
+        return
+
+    host = os.getenv("LAVALINK_HOST")
+    port = int(os.getenv("LAVALINK_PORT", "2333"))
+    password = os.getenv("LAVALINK_PASSWORD")
+    secure = os.getenv("LAVALINK_SECURE", "false").lower() in ("1", "true", "yes", "on")
+
+    if not host or not password:
+        raise RuntimeError("LAVALINK_HOST 또는 LAVALINK_PASSWORD 환경변수가 비어 있습니다.")
+
+    if not wavelink.Pool.nodes:
+        scheme = "https" if secure else "http"
+        node = wavelink.Node(uri=f"{scheme}://{host}:{port}", password=password)
+        await wavelink.Pool.connect(nodes=[node], client=bot)
+
+    bot._lavalink_connected = True
+
+
+def resolve_voice_client(ctx):
+    vc = ctx.voice_client
+    return vc if isinstance(vc, wavelink.Player) else None
+
+
+def player_is_playing(player) -> bool:
+    if not player:
+        return False
+    value = getattr(player, "playing", None)
+    if value is not None:
+        return bool(value)
+    checker = getattr(player, "is_playing", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+    return False
+
+
+def player_is_paused(player) -> bool:
+    if not player:
+        return False
+    value = getattr(player, "paused", None)
+    if value is not None:
+        return bool(value)
+    checker = getattr(player, "is_paused", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+    return False
+
+
+async def get_or_connect_player(ctx):
+    await ensure_lavalink_ready()
+
+    if ctx.author.voice is None or ctx.author.voice.channel is None:
+        raise ValueError("음성 채널 먼저 들어가줘")
+
+    channel = ctx.author.voice.channel
+    existing_vc = ctx.voice_client
+    player = resolve_voice_client(ctx)
+
+    if existing_vc is not None and player is None:
+        try:
+            await existing_vc.disconnect(force=True)
+        except Exception:
+            try:
+                await existing_vc.disconnect()
+            except Exception:
+                pass
+        player = None
+
+    if player is None:
+        player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+    elif player.channel != channel:
+        await player.move_to(channel)
+
+    state = get_music_state(ctx.guild.id)
+    state["last_voice_channel_id"] = channel.id
+    state["last_text_channel_id"] = ctx.channel.id
+    save_music_data()
+    return player
+
+
+async def search_lavalink_track(query: str):
+    candidates = build_query_candidates(query)
+    last_error = None
+    query_norm = normalize_song_text(query)
+
+    def track_score(track):
+        title = normalize_song_text(getattr(track, "title", ""))
+        author = normalize_song_text(getattr(track, "author", ""))
+        score = 0
+        if query_norm and query_norm in title:
+            score += 15
+        artist, song_title = extract_artist_title(query)
+        if artist:
+            artist_norm = normalize_song_text(artist)
+            title_norm = normalize_song_text(song_title)
+            if artist_norm in title or artist_norm in author:
+                score += 10
+            if title_norm and title_norm in title:
+                score += 10
+        for word in POSITIVE_TITLE_KEYWORDS:
+            if word in title:
+                score += 2
+        for word in NEGATIVE_TITLE_KEYWORDS:
+            if word in title:
+                score -= 5
+        return score
+
+    for candidate in candidates:
+        target = candidate
+        if not target.startswith(("http://", "https://", "ytsearch:", "ytmsearch:", "scsearch:")):
+            target = f"ytsearch:{target}"
+
+        try:
+            result = await wavelink.Playable.search(target)
+        except Exception as e:
+            last_error = e
+            continue
+
+        tracks = getattr(result, "tracks", result)
+        try:
+            tracks = list(tracks)
+        except Exception:
+            tracks = []
+
+        if tracks:
+            tracks.sort(key=track_score, reverse=True)
+            return tracks[0], candidate
+
+    if last_error is not None:
+        raise ValueError(f"Lavalink 검색 실패: {last_error}")
+    raise ValueError("검색 결과가 없습니다.")
 
 RESTARTING = False
 
@@ -151,9 +319,9 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "default_search": "ytsearch5",
     "skip_download": True,
-    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
-    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "10")),
-    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "20")),
+    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "2")),
+    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "2")),
+    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "10")),
     "nocheckcertificate": True,
     "geo_bypass": True,
     "youtube_include_dash_manifest": False,
@@ -164,7 +332,7 @@ YTDL_OPTIONS = {
     },
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "ios", "mweb"] if YTDLP_DISABLE_WEB_CLIENT else ["android", "ios", "mweb", "web_creator", "web"],
+            "player_client": ["android"] if not YTDLP_USE_COOKIES else (["android", "ios", "mweb"] if YTDLP_DISABLE_WEB_CLIENT else ["android", "ios", "mweb", "web_creator", "web"]),
             "player_skip": ["webpage", "configs"]
         }
     },
@@ -196,7 +364,11 @@ def is_blocked_music_error(error_text: str) -> bool:
         "requested format is not available",
         "unable to download api page",
         "precondition check failed",
-        "this content isn't available"
+        "this content isn't available",
+        "signature solving failed",
+        "only images are available for download",
+        "failed to extract any player response",
+        "unable to fetch gvs po token"
     ]
     return any(keyword in lowered for keyword in blocked_keywords)
 
@@ -358,45 +530,25 @@ def build_query_candidates(query: str):
         if value and value not in candidates:
             candidates.append(value)
 
-    normalized = normalize_song_text(query)
     artist, title = extract_artist_title(query)
 
     add(query)
-    add(f"ytsearch5:{query}")
-    add(f"ytsearch10:{query}")
+    add(f"ytsearch1:{query}")
 
     if artist and title:
         base = f"{artist} {title}".strip()
-        add(f"ytsearch5:{base}")
-        add(f"ytsearch5:{base} official audio")
-        add(f"ytsearch5:{base} topic")
-        add(f"ytsearch5:{base} lyrics")
-        add(f"ytsearch5:{artist} - {title}")
-        add(f"ytsearch10:{base}")
+        add(f"ytsearch1:{base} official audio")
+        add(f"ytsearch1:{base} topic")
+        add(f"{artist} - {title}")
     else:
-        add(f"ytsearch5:{query} official audio")
-        add(f"ytsearch5:{query} topic")
-        add(f"ytsearch5:{query} lyrics")
-        add(f"ytsearch10:{query} audio")
+        add(f"ytsearch1:{query} official audio")
+        add(f"ytsearch1:{query} topic")
 
-    for guessed in guess_artist_song_candidates(query):
-        add(guessed)
-        add(f"ytsearch5:{guessed}")
-        add(f"ytsearch5:{guessed} official audio")
+    guessed = guess_artist_song_candidates(query)
+    if guessed:
+        add(guessed[0])
 
-    if normalized.endswith(" 노래"):
-        artist_only = normalized[:-3].strip()
-        for guessed in guess_artist_song_candidates(artist_only):
-            add(guessed)
-            add(f"ytsearch5:{guessed}")
-
-    # 최후 fallback
-    add(f"scsearch3:{query}")
-    if artist and title:
-        add(f"scsearch3:{artist} {title}")
-
-    return candidates[:20]
-
+    return candidates[:4]
 
 
 
@@ -440,14 +592,14 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
             # 검색 품질 점수화
             scored_entries = []
-            for entry in entries[:10]:
+            for entry in entries[:4]:
                 if not entry:
                     continue
                 score = score_entry_for_query(entry, query)
                 scored_entries.append((score, entry))
             scored_entries.sort(key=lambda item: item[0], reverse=True)
 
-            for _, entry in scored_entries[:5]:
+            for _, entry in scored_entries[:1]:
                 current_data = entry
                 audio_url = current_data.get("url")
 
@@ -496,38 +648,36 @@ def build_resolve_attempts(query: str):
 
     artist, title = extract_artist_title(query)
     if artist and title:
-        add(f"{artist} {title}")
         add(f"{artist} {title} official audio")
         add(f"{artist} {title} topic")
     else:
         add(f"{query} official audio")
-        add(f"{query} topic")
-        add(f"{query} lyrics")
+        guessed = guess_artist_song_candidates(query)
+        if guessed:
+            add(guessed[0])
 
-    for guessed in guess_artist_song_candidates(query):
-        add(guessed)
+    return attempts[:3]
 
-    normalized = normalize_song_text(query)
-    if normalized.endswith(" 노래"):
-        artist_only = normalized[:-3].strip()
-        for guessed in guess_artist_song_candidates(artist_only):
-            add(guessed)
-
-    return attempts[:10]
 
 
 async def try_resolve_player_with_fallback(query: str):
     attempted_queries = []
+    last_error = None
 
     for candidate in build_resolve_attempts(query):
         attempted_queries.append(candidate)
         try:
             player = await YTDLSource.from_query(candidate)
             return player, attempted_queries
-        except Exception:
+        except Exception as e:
+            last_error = e
+            if is_blocked_music_error(str(e)):
+                break
             continue
 
-    # 마지막으로 원본 쿼리 에러를 그대로 올려서 안내문 유지
+    if last_error is not None:
+        raise last_error
+
     player = await YTDLSource.from_query(query)
     return player, attempted_queries or [query]
 
@@ -621,14 +771,26 @@ def load_music_data():
 # 공통 유틸
 # =========================
 def resolve_font_path():
-    candidates = [
-        FONT_FILE,
-        os.path.join(os.getcwd(), "온글잎 박다현체.ttf"),
-        os.path.join("/mnt/data", "온글잎 박다현체.ttf"),
-    ]
-    for path in candidates:
-        if path and os.path.exists(path):
-            return path
+    candidates = []
+    for base in [BASE_DIR, os.getcwd(), "/mnt/data", DATA_DIR]:
+        if not base:
+            continue
+        candidates.append(os.path.join(base, "온글잎 박다현체.ttf"))
+        try:
+            for name in os.listdir(base):
+                if not name.lower().endswith(".ttf"):
+                    continue
+                full = os.path.join(base, name)
+                normalized = unicodedata.normalize("NFC", name)
+                if normalized == "온글잎 박다현체.ttf" or "박다현" in normalized or "온글잎" in normalized:
+                    return full
+                candidates.append(full)
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
     return None
 
 
@@ -636,13 +798,12 @@ def get_font(size: int):
     font_path = resolve_font_path()
     if font_path:
         try:
-            return ImageFont.truetype(font_path, size=size)
+            return ImageFont.truetype(font_path, size)
         except Exception as e:
-            print(f"[폰트 오류] {font_path} | {e}")
+            print(f"[폰트 오류] {e} | path={font_path}")
     else:
         print("[폰트 오류] 온글잎 박다현체.ttf 파일을 찾지 못함")
     return ImageFont.load_default()
-
 
 def safe_text(text: str, limit: int):
     return text if len(text) <= limit else text[:limit]
@@ -822,60 +983,55 @@ async def check_schedule():
 async def play_next(guild_id: int):
     queue = get_guild_queue(guild_id)
     state = get_music_state(guild_id)
+    guild = bot.get_guild(guild_id)
+
+    if guild is None:
+        state["current"] = None
+        save_music_data()
+        return
+
+    player = guild.voice_client if isinstance(guild.voice_client, wavelink.Player) else None
 
     if not queue:
         state["current"] = None
         save_music_data()
         return
 
-    ctx, query = queue.pop(0)
+    channel_id, query = unpack_queue_item(queue.pop(0))
+    if channel_id:
+        state["last_text_channel_id"] = channel_id
 
-    if ctx.voice_client is None:
+    if player is None:
         state["current"] = None
         save_music_data()
+        await send_music_message(guild_id, "❌ 음성 채널 연결이 끊어졌어. 다시 !입장 후 !재생 해줘")
         return
 
     try:
-        player, attempted_queries = await try_resolve_player_with_fallback(query)
+        track, matched_query = await search_lavalink_track(query)
 
         state["current"] = {
-            "title": player.title,
+            "title": getattr(track, "title", query),
             "query": query,
-            "url": player.webpage_url or player.original_url
+            "url": getattr(track, "uri", None)
         }
         state["last_query"] = query
         state["fail_count"] = 0
-        if ctx.voice_client and ctx.voice_client.channel:
-            state["last_voice_channel_id"] = ctx.voice_client.channel.id
-        state["restored_queue"] = [saved_query for _, saved_query in queue if isinstance(saved_query, str)]
+        if getattr(player, "channel", None):
+            state["last_voice_channel_id"] = player.channel.id
+        state["restored_queue"] = [saved_query for _, saved_query in (unpack_queue_item(item) for item in queue) if isinstance(saved_query, str)]
         save_music_data()
 
-        def after_play(error):
-            if error:
-                print(f"재생 후 오류: {error}")
-
-            if state["current"]:
-                if state["repeat"]:
-                    queue.insert(0, (ctx, state["current"]["query"]))
-                else:
-                    state["history"].append(state["current"]["query"])
-
-            future = asyncio.run_coroutine_threadsafe(play_next(guild_id), bot.loop)
-            try:
-                future.result()
-            except Exception as e:
-                print(f"다음 곡 처리 오류: {e}")
-
-        ctx.voice_client.play(player, after=after_play)
+        await player.play(track)
 
         extra_line = ""
-        if len(attempted_queries) > 1:
-            extra_line = f"\n검색 보정: {len(attempted_queries)}개 후보 중 성공"
+        if matched_query != query:
+            extra_line = f"\n검색 보정: `{matched_query}`"
 
-        await ctx.send(
-            f"🎵 재생 중: **{player.title}**\n"
-            f"대기열: {len(queue)}곡{extra_line}",
-            view=MusicView(ctx)
+        await send_music_message(
+            guild_id,
+            f"🎵 재생 중: **{getattr(track, 'title', query)}**\n대기열: {len(queue)}곡{extra_line}",
+            view=MusicView(guild_id)
         )
 
     except Exception as e:
@@ -883,30 +1039,16 @@ async def play_next(guild_id: int):
         print(f"곡 재생 실패, 자동 스킵: {query} | {error_text}")
 
         state["fail_count"] = state.get("fail_count", 0) + 1
-        if is_blocked_music_error(error_text):
-            state["blocked_fail_count"] = state.get("blocked_fail_count", 0) + 1
         state["auto_skipped_count"] = state.get("auto_skipped_count", 0) + 1
         state["current"] = None
         save_music_data()
 
         if queue:
-            if is_blocked_music_error(error_text):
-                await ctx.send(
-                    f"⚠️ `{query}` 재생 실패 → 유튜브 차단/제한으로 보여서 자동 스킵할게\n"
-                    f"남은 대기열 {len(queue)}곡 계속 시도해볼게"
-                )
-            else:
-                await ctx.send(f"⚠️ `{query}` 재생 실패 → 자동으로 다음 곡으로 넘어갈게")
+            await send_music_message(guild_id, f"⚠️ `{query}` 재생 실패 → 자동으로 다음 곡으로 넘어갈게")
             await asyncio.sleep(1)
             await play_next(guild_id)
         else:
-            if is_blocked_music_error(error_text):
-                await ctx.send(
-                    "⚠️ 마지막 곡도 유튜브 차단 때문에 실패했어.\n"
-                    "지금은 자동 스킵할 곡도 없어서 정지할게. cookies.txt 적용하면 훨씬 안정적이야."
-                )
-            else:
-                await ctx.send(f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
+            await send_music_message(guild_id, f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
 
 
 # =========================
@@ -995,7 +1137,7 @@ def create_calendar_image(year: int, month: int):
             draw.text((x1 + 12, y1 + 10), str(day_num), fill=day_color, font=day_font)
 
             items = date_map.get(day_num, [])
-            preview_y = y1 + 38
+            preview_y = y1 + 40
 
             for idx, item in enumerate(items[:2]):
                 preview = safe_text(item["text"], 9)
@@ -1177,30 +1319,35 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
         await interaction.response.send_message("✅ 일정 등록 완료\n새로 !캘린더 입력하면 반영돼", ephemeral=True)
 
 
+
 class AddSongModal(discord.ui.Modal, title="노래 추가"):
     song = discord.ui.TextInput(label="노래 제목 또는 URL", placeholder="예: 아이유 밤편지 / 유튜브 링크")
 
-    def __init__(self, ctx):
+    def __init__(self, guild_id: int, channel_id: int):
         super().__init__()
-        self.ctx = ctx
+        self.guild_id = guild_id
+        self.channel_id = channel_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        guild_id = self.ctx.guild.id
-        queue = get_guild_queue(guild_id)
-        queue.append((self.ctx, self.song.value))
-        state = get_music_state(guild_id)
+        queue = get_guild_queue(self.guild_id)
+        queue.append(make_queue_item(self.channel_id, self.song.value))
+        state = get_music_state(self.guild_id)
         state["last_query"] = self.song.value
+        state["last_text_channel_id"] = self.channel_id
         save_music_data()
 
-        voice_client = self.ctx.voice_client
-        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+        guild = bot.get_guild(self.guild_id)
+        player = guild.voice_client if guild and isinstance(guild.voice_client, wavelink.Player) else None
+
+        if player and (player_is_playing(player) or player_is_paused(player)):
             await interaction.response.send_message(f"🎶 대기열 추가됨: {self.song.value}", ephemeral=True)
         else:
             await interaction.response.send_message(f"▶️ 바로 재생 시도: {self.song.value}", ephemeral=True)
-            await play_next(guild_id)
+            await play_next(self.guild_id)
 
 
 class ScheduleSelect(discord.ui.Select):
+
     def __init__(self, action_type: str):
         self.action_type = action_type
 
@@ -1360,90 +1507,102 @@ class CalendarView(discord.ui.View):
 # =========================
 # 음악 UI
 # =========================
+
 class MusicView(discord.ui.View):
-    def __init__(self, ctx):
+    def __init__(self, guild_id: int):
         super().__init__(timeout=3600)
-        self.ctx = ctx
+        self.guild_id = guild_id
+
+    def get_player(self):
+        guild = bot.get_guild(self.guild_id)
+        if guild and isinstance(guild.voice_client, wavelink.Player):
+            return guild.voice_client
+        return None
 
     @discord.ui.button(label="⏮ 이전곡", style=discord.ButtonStyle.secondary, row=0)
     async def prev_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild_id = self.ctx.guild.id
-        state = get_music_state(guild_id)
-        queue = get_guild_queue(guild_id)
+        state = get_music_state(self.guild_id)
+        queue = get_guild_queue(self.guild_id)
+        player = self.get_player()
 
         if not state["history"]:
             await interaction.response.send_message("이전곡이 없어", ephemeral=True)
             return
 
         prev_query = state["history"].pop()
-        queue.insert(0, (self.ctx, prev_query))
+        queue.insert(0, make_queue_item(interaction.channel_id, prev_query))
+        state["last_text_channel_id"] = interaction.channel_id
+        save_music_data()
 
-        if self.ctx.voice_client:
-            self.ctx.voice_client.stop()
+        if player:
+            await player.stop()
             await interaction.response.send_message(f"⏮ 이전곡으로 이동: {prev_query}", ephemeral=True)
         else:
             await interaction.response.send_message("음성 채널에 없어", ephemeral=True)
 
     @discord.ui.button(label="⏭ 다음곡", style=discord.ButtonStyle.secondary, row=0)
     async def next_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild_id = self.ctx.guild.id
-        queue = get_guild_queue(guild_id)
+        queue = get_guild_queue(self.guild_id)
+        player = self.get_player()
 
         if not queue:
             await interaction.response.send_message("다음곡이 없어", ephemeral=True)
             return
 
-        if self.ctx.voice_client:
-            self.ctx.voice_client.stop()
+        if player:
+            state = get_music_state(self.guild_id)
+            state["last_text_channel_id"] = interaction.channel_id
+            save_music_data()
+            await player.stop()
             await interaction.response.send_message("⏭ 다음곡으로 넘어갈게", ephemeral=True)
         else:
             await interaction.response.send_message("음성 채널에 없음", ephemeral=True)
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.primary, row=0)
     async def toggle_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
-        vc = self.ctx.voice_client
-        if vc is None:
+        player = self.get_player()
+        if player is None:
             await interaction.response.send_message("음성 채널에 없어", ephemeral=True)
             return
 
-        if vc.is_playing():
-            vc.pause()
+        if player_is_playing(player):
+            await player.pause(True)
             await interaction.response.send_message("⏸️ 일시정지", ephemeral=True)
-        elif vc.is_paused():
-            vc.resume()
+        elif player_is_paused(player):
+            await player.pause(False)
             await interaction.response.send_message("▶️ 다시 재생", ephemeral=True)
         else:
             await interaction.response.send_message("현재 재생 중인 노래가 없어", ephemeral=True)
 
     @discord.ui.button(label="⏹", style=discord.ButtonStyle.danger, row=0)
     async def stop_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild_id = self.ctx.guild.id
-        music_queues[guild_id] = []
-        state = get_music_state(guild_id)
+        music_queues[self.guild_id] = []
+        state = get_music_state(self.guild_id)
         state["current"] = None
-
+        state["restored_queue"] = []
+        state["last_text_channel_id"] = interaction.channel_id
         save_music_data()
 
-        if self.ctx.voice_client:
-            self.ctx.voice_client.stop()
+        player = self.get_player()
+        if player:
+            await player.stop()
             await interaction.response.send_message("⏹️ 정지 완료", ephemeral=True)
         else:
             await interaction.response.send_message("음성 채널에 없음", ephemeral=True)
 
     @discord.ui.button(label="🔁", style=discord.ButtonStyle.success, row=0)
     async def repeat_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild_id = self.ctx.guild.id
-        state = get_music_state(guild_id)
+        state = get_music_state(self.guild_id)
         state["repeat"] = not state["repeat"]
+        state["last_text_channel_id"] = interaction.channel_id
         save_music_data()
         text = "🔁 반복 켜짐" if state["repeat"] else "➡️ 반복 꺼짐"
         await interaction.response.send_message(text, ephemeral=True)
 
     @discord.ui.button(label="📜 노래리스트", style=discord.ButtonStyle.secondary, row=1)
     async def queue_list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild_id = self.ctx.guild.id
-        state = get_music_state(guild_id)
-        queue = get_guild_queue(guild_id)
+        state = get_music_state(self.guild_id)
+        queue = get_guild_queue(self.guild_id)
 
         lines = []
         if state["current"]:
@@ -1455,7 +1614,8 @@ class MusicView(discord.ui.View):
 
         if queue:
             lines.append("📜 대기열")
-            for i, (_, query) in enumerate(queue, start=1):
+            for i, item in enumerate(queue, start=1):
+                _, query = unpack_queue_item(item)
                 lines.append(f"{i}. {query}")
         else:
             lines.append("📜 대기열 비어 있음")
@@ -1469,8 +1629,7 @@ class MusicView(discord.ui.View):
 
     @discord.ui.button(label="📄 가사", style=discord.ButtonStyle.secondary, row=1)
     async def lyrics_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild_id = self.ctx.guild.id
-        state = get_music_state(guild_id)
+        state = get_music_state(self.guild_id)
         current = state["current"]
 
         if not current:
@@ -1519,18 +1678,17 @@ class MusicView(discord.ui.View):
 
     @discord.ui.button(label="➕ 노래추가", style=discord.ButtonStyle.success, row=1)
     async def add_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddSongModal(self.ctx))
+        await interaction.response.send_modal(AddSongModal(self.guild_id, interaction.channel_id))
 
     @discord.ui.button(label="🗑 노래삭제", style=discord.ButtonStyle.danger, row=1)
     async def remove_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild_id = self.ctx.guild.id
-        queue = get_guild_queue(guild_id)
+        queue = get_guild_queue(self.guild_id)
 
         if not queue:
             await interaction.response.send_message("대기열이 비어 있어", ephemeral=True)
             return
 
-        await interaction.response.send_message("삭제할 노래를 골라줘", view=MusicDeleteView(guild_id), ephemeral=True)
+        await interaction.response.send_message("삭제할 노래를 골라줘", view=MusicDeleteView(self.guild_id), ephemeral=True)
 
 
 # =========================
@@ -1550,27 +1708,27 @@ async def on_ready():
         if cookie_file:
             print(f"yt-dlp cookies 적용됨: {cookie_file}")
         else:
-            print("yt-dlp cookies 미적용: cookies.txt 없으면 일부 유튜브 재생이 막힐 수 있음")
+            print("yt-dlp cookies 미적용: 쿠키 없이 우회 모드로 시도할게")
         print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}")
         print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
 
-        # 재시동 완료 메시지 처리
+        await ensure_lavalink_ready()
+
         if os.path.exists(RESTART_FILE):
             try:
-                # 같은 재시동 완료 처리가 두 번 실행되지 않도록 먼저 파일을 원자적으로 옮김
                 os.replace(RESTART_FILE, RESTART_PROCESSING_FILE)
 
                 with open(RESTART_PROCESSING_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    channel_id = data.get("channel_id")
-                    message_id = data.get("message_id")
-                    guild_id = data.get("guild_id")
-                    voice_channel_id = data.get("voice_channel_id")
-                    last_query = data.get("last_query")
-                    queue_data = data.get("queue", [])
-                    repeat_state = data.get("repeat", False)
 
-                # 완료 메시지는 한 번만 처리
+                channel_id = data.get("channel_id")
+                message_id = data.get("message_id")
+                guild_id = data.get("guild_id")
+                voice_channel_id = data.get("voice_channel_id")
+                last_query = data.get("last_query")
+                queue_data = data.get("queue", [])
+                repeat_state = data.get("repeat", False)
+
                 if channel_id and message_id:
                     channel = bot.get_channel(channel_id)
                     if channel:
@@ -1580,7 +1738,6 @@ async def on_ready():
                         except Exception:
                             await channel.send("✅ 재시동 완료!")
 
-                # 자동 재입장 및 음악 상태 복구
                 if guild_id:
                     guild = bot.get_guild(guild_id)
                     if guild:
@@ -1588,21 +1745,20 @@ async def on_ready():
                         if last_query:
                             state["last_query"] = last_query
                         state["repeat"] = repeat_state
-
-                        restored_queue = []
-                        for q in queue_data:
-                            if isinstance(q, str):
-                                restored_queue.append(q)
-                        state["restored_queue"] = restored_queue
+                        state["restored_queue"] = [q for q in queue_data if isinstance(q, str)]
 
                         if voice_channel_id:
                             voice_channel = bot.get_channel(voice_channel_id)
                             if voice_channel and getattr(voice_channel, "connect", None):
                                 try:
                                     if guild.voice_client is None:
-                                        await voice_channel.connect()
+                                        await voice_channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
                                     else:
-                                        await guild.voice_client.move_to(voice_channel)
+                                        player = guild.voice_client
+                                        if isinstance(player, wavelink.Player):
+                                            await player.move_to(voice_channel)
+                                        else:
+                                            await guild.voice_client.move_to(voice_channel)
                                     state["last_voice_channel_id"] = voice_channel_id
                                 except Exception as e:
                                     print(f"자동 재입장 실패: {e}")
@@ -1629,6 +1785,38 @@ async def on_message(message):
     if message.author.bot:
         return
     await bot.process_commands(message)
+
+
+@bot.event
+async def on_wavelink_track_end(payload):
+    player = getattr(payload, "player", None)
+    if not player or not getattr(player, "guild", None):
+        return
+
+    guild_id = player.guild.id
+    state = get_music_state(guild_id)
+
+    current = state.get("current")
+    if current:
+        if state.get("repeat"):
+            queue = get_guild_queue(guild_id)
+            queue.insert(0, make_queue_item(state.get("last_text_channel_id"), current["query"]))
+        else:
+            state["history"].append(current["query"])
+
+    state["current"] = None
+    save_music_data()
+    await play_next(guild_id)
+
+
+@bot.event
+async def on_wavelink_track_exception(payload):
+    player = getattr(payload, "player", None)
+    if not player or not getattr(player, "guild", None):
+        return
+    guild_id = player.guild.id
+    await send_music_message(guild_id, "⚠️ 재생 중 오류가 발생해서 다음 곡으로 넘어갈게")
+    await play_next(guild_id)
 
 
 # =========================
@@ -1661,7 +1849,7 @@ async def restart(ctx):
             last_query = current.get("query")
 
         queue = get_guild_queue(guild_id)
-        queue_data = [query for _, query in queue if isinstance(query, str)]
+        queue_data = [query for _, query in (unpack_queue_item(item) for item in queue) if isinstance(query, str)]
 
         if ctx.voice_client and ctx.voice_client.channel:
             voice_channel_id = ctx.voice_client.channel.id
@@ -1686,7 +1874,8 @@ async def restart(ctx):
 
     try:
         if ctx.voice_client:
-            await ctx.voice_client.disconnect()
+            player = resolve_voice_client(ctx) or ctx.voice_client
+            await player.disconnect()
     except Exception:
         pass
 
@@ -1703,13 +1892,26 @@ async def join(ctx):
     channel = ctx.author.voice.channel
 
     try:
-        if ctx.voice_client is None:
-            await channel.connect()
+        await ensure_lavalink_ready()
+        existing_vc = ctx.voice_client
+        player = resolve_voice_client(ctx)
+        if existing_vc is not None and player is None:
+            try:
+                await existing_vc.disconnect(force=True)
+            except Exception:
+                try:
+                    await existing_vc.disconnect()
+                except Exception:
+                    pass
+        player = resolve_voice_client(ctx)
+        if player is None:
+            await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
         else:
-            await ctx.voice_client.move_to(channel)
+            await player.move_to(channel)
 
         state = get_music_state(ctx.guild.id)
         state["last_voice_channel_id"] = channel.id
+        state["last_text_channel_id"] = ctx.channel.id
         save_music_data()
 
         await ctx.send(f"✅ {channel.name} 입장 완료")
@@ -1733,11 +1935,11 @@ async def leave(ctx):
         state["restored_queue"] = []
         save_music_data()
 
-        await ctx.voice_client.disconnect()
+        player = resolve_voice_client(ctx) or ctx.voice_client
+        await player.disconnect()
         await ctx.send("👋 퇴장 완료")
     else:
         await ctx.send("음성 채널에 없음")
-
 
 
 @bot.command(name="재생")
@@ -1754,21 +1956,19 @@ async def play(ctx, *, query: str = None):
             await ctx.send("재생할 노래를 먼저 입력해줘")
             return
 
-    if ctx.voice_client is None:
-        if ctx.author.voice is None:
-            await ctx.send("음성 채널 먼저 들어가줘")
-            return
-        await ctx.author.voice.channel.connect()
-        state["last_voice_channel_id"] = ctx.author.voice.channel.id
-    elif ctx.voice_client.channel:
-        state["last_voice_channel_id"] = ctx.voice_client.channel.id
+    try:
+        player = await get_or_connect_player(ctx)
+    except Exception as e:
+        await ctx.send(str(e))
+        return
 
     queue = get_guild_queue(guild_id)
+    state["last_text_channel_id"] = ctx.channel.id
 
     restored_queue = state.get("restored_queue", [])
     if restored_queue:
         for restored_query in restored_queue:
-            queue.append((ctx, restored_query))
+            queue.append(make_queue_item(ctx.channel.id, restored_query))
         state["restored_queue"] = []
 
     if is_youtube_playlist_url(query):
@@ -1784,45 +1984,24 @@ async def play(ctx, *, query: str = None):
 
         added_queries = []
         for _, entry_url in playlist_entries:
-            queue.append((ctx, entry_url))
+            queue.append(make_queue_item(ctx.channel.id, entry_url))
             added_queries.append(entry_url)
 
         state["last_query"] = query
         save_music_data()
 
-        await ctx.send(f"📃 플레이리스트 추가 완료: {len(added_queries)}곡", view=MusicView(ctx))
+        await ctx.send(f"📃 플레이리스트 추가 완료: {len(added_queries)}곡", view=MusicView(guild_id))
 
-        if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+        if not player_is_playing(player) and not player_is_paused(player):
             await play_next(guild_id)
         return
 
-    if is_youtube_playlist_url(query):
-        try:
-            playlist_entries = await extract_playlist_entries(query)
-        except Exception as e:
-            await ctx.send(f"❌ 플레이리스트를 불러오지 못했어: {sanitize_music_error(e)}")
-            return
-
-        if not playlist_entries:
-            await ctx.send("플레이리스트 곡을 찾지 못했어")
-            return
-
-        for title, url in playlist_entries:
-            queue.append((ctx, url))
-        state["last_query"] = playlist_entries[0][1]
-        save_music_data()
-
-        await ctx.send(f"📃 플레이리스트 {len(playlist_entries)}곡을 대기열에 추가했어", view=MusicView(ctx))
-        if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
-            await play_next(guild_id)
-        return
-
-    queue.append((ctx, query))
+    queue.append(make_queue_item(ctx.channel.id, query))
     state["last_query"] = query
     save_music_data()
 
-    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-        await ctx.send(f"🎶 대기열 추가됨: {query}", view=MusicView(ctx))
+    if player_is_playing(player) or player_is_paused(player):
+        await ctx.send(f"🎶 대기열 추가됨: {query}", view=MusicView(guild_id))
     else:
         await play_next(guild_id)
 
@@ -1837,19 +2016,28 @@ async def stop(ctx):
         state["last_query"] = state["current"]["query"]
     state["current"] = None
     state["restored_queue"] = []
+    state["last_text_channel_id"] = ctx.channel.id
     save_music_data()
 
-    if ctx.voice_client:
-        ctx.voice_client.stop()
-        await ctx.send("⏹️ 정지 완료")
+    player = resolve_voice_client(ctx) or ctx.voice_client
+    if player:
+        try:
+            if isinstance(player, wavelink.Player):
+                await player.stop()
+            else:
+                player.stop()
+            await ctx.send("⏹️ 정지 완료")
+        except Exception as e:
+            await ctx.send(f"❌ 정지 실패: {e}")
     else:
         await ctx.send("음성 채널에 없음")
 
 
 @bot.command(name="일시정지")
 async def pause(ctx):
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.pause()
+    player = resolve_voice_client(ctx)
+    if player and player_is_playing(player):
+        await player.pause(True)
         await ctx.send("⏸️ 일시정지")
     else:
         await ctx.send("현재 재생 중인 노래가 없어")
@@ -1857,8 +2045,9 @@ async def pause(ctx):
 
 @bot.command(name="다시재생")
 async def resume(ctx):
-    if ctx.voice_client and ctx.voice_client.is_paused():
-        ctx.voice_client.resume()
+    player = resolve_voice_client(ctx)
+    if player and player_is_paused(player):
+        await player.pause(False)
         await ctx.send("▶️ 다시 재생")
     else:
         await ctx.send("일시정지된 노래가 없어")
@@ -1963,6 +2152,15 @@ async def cookie_status(ctx):
             f"web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}"
         )
 
+
+@bot.command(name="우회상태")
+async def bypass_status(ctx):
+    mode = "쿠키 사용" if resolve_cookie_file() else "쿠키 없이 우회 모드"
+    await ctx.send(
+        f"🛠 재생 모드: {mode}\n"
+        f"- web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}\n"
+        f"- IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}"
+    )
 
 
 @bot.command(name="음악상태")
