@@ -1,4 +1,4 @@
-# version: 2026-03-28-cookieless-workaround
+# version: 2026-03-29-wavelink-join-unmute-compiled
 import discord
 from discord.ext import commands
 import json
