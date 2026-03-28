@@ -621,8 +621,11 @@ def load_music_data():
 # 공통 유틸
 # =========================
 def get_font(size: int):
-    if os.path.exists(FONT_FILE):
+    try:
         return ImageFont.truetype(FONT_FILE, size)
+    except Exception as e:
+        print(f"[폰트 오류] {e}")
+        return ImageFont.load_default()
     return ImageFont.load_default()
 
 
