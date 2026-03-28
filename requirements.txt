@@ -1,7 +1,1 @@
-discord.py
-yt-dlp
-aiohttp
-python-dotenv
-Pillow
-PyNaCl
-davey
+Wavelink==2.6.5
