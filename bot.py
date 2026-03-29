@@ -771,31 +771,18 @@ def load_music_data():
 # 공통 유틸
 # =========================
 def resolve_font_path():
-    candidates = [
-        FONT_FILE,
-        os.path.join(BASE_DIR, "onglefont.ttf"),
-        os.path.join(os.getcwd(), "onglefont.ttf"),
-        os.path.join(DATA_DIR, "onglefont.ttf"),
-        "/mnt/data/onglefont.ttf",
-    ]
-
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
-            return candidate
-
+    if os.path.isfile(FONT_FILE):
+        return FONT_FILE
     return None
 
 
 def get_font(size: int):
-    font_path = resolve_font_path()
-    if font_path:
-        try:
-            return ImageFont.truetype(font_path, size)
-        except Exception as e:
-            print(f"[폰트 오류] {e} | path={font_path}")
-    else:
-        print("[폰트 오류] onglefont.ttf 파일을 찾지 못함")
-    return ImageFont.load_default()
+    try:
+        return ImageFont.truetype(FONT_FILE, size)
+    except Exception as e:
+        print(f"[폰트 오류] {e} | path={FONT_FILE}")
+        return ImageFont.load_default()
+
 
 def safe_text(text: str, limit: int):
     return text if len(text) <= limit else text[:limit]
@@ -2229,4 +2216,3 @@ async def restart_error(ctx, error):
 
 
 bot.run(TOKEN)
-# force redeploy
