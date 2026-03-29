@@ -14,7 +14,13 @@ import unicodedata
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
-from korean_lunar_calendar import KoreanLunarCalendar
+
+try:
+    from korean_lunar_calendar import KoreanLunarCalendar
+    LUNAR_CALENDAR_AVAILABLE = True
+except ImportError:
+    KoreanLunarCalendar = None
+    LUNAR_CALENDAR_AVAILABLE = False
 
 from dotenv import load_dotenv
 
@@ -44,7 +50,7 @@ YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower(
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
-FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
+FONT_FILE = os.path.join(BASE_DIR, "onglefont.ttf")
 
 # =========================
 # 기본 설정
@@ -833,6 +839,8 @@ def schedule_occurs_on_date(item: dict, target_date):
 
 
 def lunar_to_solar(year: int, month: int, day: int, intercalation: bool = False):
+    if not LUNAR_CALENDAR_AVAILABLE or KoreanLunarCalendar is None:
+        return None
     calendar_obj = KoreanLunarCalendar()
     calendar_obj.setLunarDate(year, month, day, intercalation)
     return datetime.strptime(calendar_obj.SolarIsoFormat(), "%Y-%m-%d").date()
@@ -859,17 +867,20 @@ def get_korean_holidays(year: int):
         add_holiday(datetime(year, month, day).date(), name)
 
     seollal = lunar_to_solar(year, 1, 1)
-    add_holiday(seollal - timedelta(days=1), "설날 연휴")
-    add_holiday(seollal, "설날")
-    add_holiday(seollal + timedelta(days=1), "설날 연휴")
+    if seollal is not None:
+        add_holiday(seollal - timedelta(days=1), "설날 연휴")
+        add_holiday(seollal, "설날")
+        add_holiday(seollal + timedelta(days=1), "설날 연휴")
 
     buddha = lunar_to_solar(year, 4, 8)
-    add_holiday(buddha, "부처님오신날")
+    if buddha is not None:
+        add_holiday(buddha, "부처님오신날")
 
     chuseok = lunar_to_solar(year, 8, 15)
-    add_holiday(chuseok - timedelta(days=1), "추석 연휴")
-    add_holiday(chuseok, "추석")
-    add_holiday(chuseok + timedelta(days=1), "추석 연휴")
+    if chuseok is not None:
+        add_holiday(chuseok - timedelta(days=1), "추석 연휴")
+        add_holiday(chuseok, "추석")
+        add_holiday(chuseok + timedelta(days=1), "추석 연휴")
 
     def add_substitute(base_dates, name):
         if any(base.weekday() >= 5 for base in base_dates):
@@ -880,12 +891,15 @@ def get_korean_holidays(year: int):
 
     add_substitute([datetime(year, 3, 1).date()], "삼일절 대체공휴일")
     add_substitute([datetime(year, 5, 5).date()], "어린이날 대체공휴일")
-    add_substitute([buddha], "부처님오신날 대체공휴일")
+    if buddha is not None:
+        add_substitute([buddha], "부처님오신날 대체공휴일")
     add_substitute([datetime(year, 8, 15).date()], "광복절 대체공휴일")
     add_substitute([datetime(year, 10, 3).date()], "개천절 대체공휴일")
     add_substitute([datetime(year, 10, 9).date()], "한글날 대체공휴일")
-    add_substitute([seollal - timedelta(days=1), seollal, seollal + timedelta(days=1)], "설날 대체공휴일")
-    add_substitute([chuseok - timedelta(days=1), chuseok, chuseok + timedelta(days=1)], "추석 대체공휴일")
+    if seollal is not None:
+        add_substitute([seollal - timedelta(days=1), seollal, seollal + timedelta(days=1)], "설날 대체공휴일")
+    if chuseok is not None:
+        add_substitute([chuseok - timedelta(days=1), chuseok, chuseok + timedelta(days=1)], "추석 대체공휴일")
 
     return holidays
 
@@ -984,14 +998,14 @@ def resolve_font_path():
     for base in [BASE_DIR, os.getcwd(), "/mnt/data", DATA_DIR]:
         if not base:
             continue
-        candidates.append(os.path.join(base, "온글잎 박다현체.ttf"))
+        candidates.extend([os.path.join(base, "onglefont.ttf"), os.path.join(base, "온글잎 박다현체.ttf")])
         try:
             for name in os.listdir(base):
                 if not name.lower().endswith(".ttf"):
                     continue
                 full = os.path.join(base, name)
                 normalized = unicodedata.normalize("NFC", name)
-                if normalized == "온글잎 박다현체.ttf" or "박다현" in normalized or "온글잎" in normalized:
+                if normalized in {"onglefont.ttf", "온글잎 박다현체.ttf"} or "박다현" in normalized or "온글잎" in normalized or "onglefont" in normalized.lower():
                     return full
                 candidates.append(full)
         except Exception:
@@ -1011,7 +1025,7 @@ def get_font(size: int):
         except Exception as e:
             print(f"[폰트 오류] {e} | path={font_path}")
     else:
-        print("[폰트 오류] 온글잎 박다현체.ttf 파일을 찾지 못함")
+        print("[폰트 오류] onglefont.ttf 파일을 찾지 못함")
     return ImageFont.load_default()
 
 def safe_text(text: str, limit: int):

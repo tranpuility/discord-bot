@@ -5,3 +5,4 @@ PyNaCl
 python-dotenv
 aiohttp
 Pillow
+korean-lunar-calendar
