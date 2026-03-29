@@ -1495,10 +1495,10 @@ def create_calendar_image(year: int, month: int):
 
     for i, day_name in enumerate(days):
         color = text_main
-        if i == 5:
-            color = sat_blue
-        elif i == 6:
+        if i == 0:
             color = sun_red
+        elif i == 6:
+            color = sat_blue
 
         bbox = draw.textbbox((0, 0), day_name, font=header_font)
         tw = bbox[2] - bbox[0]
@@ -1525,10 +1525,10 @@ def create_calendar_image(year: int, month: int):
                 continue
 
             day_color = text_main
-            if col_idx == 5:
-                day_color = sat_blue
-            elif col_idx == 6:
+            if col_idx == 0:
                 day_color = sun_red
+            elif col_idx == 6:
+                day_color = sat_blue
 
             if is_current_month and day_num == now.day:
                 draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=today_fill, outline=today_outline, width=4)
@@ -1722,7 +1722,7 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
     time_input = discord.ui.TextInput(label="시간", placeholder="18:00")
     text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
     category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False)
-    repeat_input = discord.ui.TextInput(label="반복 설정", placeholder="없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말", required=False)
+    repeat_input = discord.ui.TextInput(label="반복 설정", placeholder="없음 / 매일 / 매월 / 매년 / 요일반복", required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
