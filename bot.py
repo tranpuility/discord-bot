@@ -504,6 +504,33 @@ def normalize_schedule_category(value: str) -> str:
     return mapping.get(raw, "personal")
 
 
+
+def build_schedule_item_from_values(normalized_date: str, normalized_time: str, text_value: str, user, channel_id: int, category_value: str, repeat_type: str = "none", repeat_days=None):
+    if repeat_days is None:
+        repeat_days = []
+    user_id = str(user.id)
+    user_name = user.display_name
+    color = user_colors.get(user_id, DEFAULT_COLOR)
+    category = normalize_schedule_category(category_value)
+    item = {
+        "datetime": f"{normalized_date} {normalized_time}",
+        "text": text_value.strip(),
+        "name": user_name,
+        "user_id": user.id,
+        "color": color,
+        "category": category,
+        "repeat_type": repeat_type,
+        "repeat_days": repeat_days,
+        "alert_enabled": False,
+        "alert_10min": False,
+        "channel_id": channel_id,
+    }
+    schedule.append(item)
+    save_schedule()
+    return item
+
+PENDING_WEEKDAY_SCHEDULES = {}
+
 def parse_repeat_rule(value: str):
     raw = str(value or "").strip().replace(" ", "")
     if not raw or raw.lower() in {"없음", "안함", "none"}:
@@ -1458,7 +1485,7 @@ def create_calendar_image(year: int, month: int):
     title_w = bbox[2] - bbox[0]
     draw.text(((width - title_w) / 2, 78), title, fill=title_color, font=title_font)
 
-    days = ["월", "화", "수", "목", "금", "토", "일"]
+    days = ["일", "월", "화", "수", "목", "금", "토"]
     grid_left = 105
     grid_top = 210
     cell_w = 124
@@ -1477,7 +1504,7 @@ def create_calendar_image(year: int, month: int):
         tw = bbox[2] - bbox[0]
         draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 160), day_name, fill=color, font=header_font)
 
-    cal = calendar.Calendar(firstweekday=0)
+    cal = calendar.Calendar(firstweekday=6)
     month_days = cal.monthdayscalendar(year, month)
     date_map = get_month_schedule_map(year, month)
     holiday_map = get_month_holidays(year, month)
@@ -1706,33 +1733,165 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
             return
 
         repeat_type, repeat_days = parse_repeat_rule(self.repeat_input.value)
-        user_id = str(interaction.user.id)
-        user_name = interaction.user.display_name
-        color = user_colors.get(user_id, DEFAULT_COLOR)
-        category = normalize_schedule_category(self.category_input.value)
+        item = build_schedule_item_from_values(
+            normalized_date,
+            normalized_time,
+            self.text.value,
+            interaction.user,
+            interaction.channel_id,
+            self.category_input.value,
+            repeat_type,
+            repeat_days
+        )
 
-        schedule.append({
-            "datetime": f"{normalized_date} {normalized_time}",
-            "text": self.text.value.strip(),
-            "name": user_name,
-            "user_id": interaction.user.id,
-            "color": color,
-            "category": category,
-            "repeat_type": repeat_type,
-            "repeat_days": repeat_days,
-            "alert_enabled": False,
-            "alert_10min": False,
-            "channel_id": interaction.channel_id
-        })
-        save_schedule()
-
-        category_label = SCHEDULE_CATEGORY_LABELS.get(category, "개인일정")
-        repeat_label = repeat_rule_to_text(schedule[-1])
+        category_label = SCHEDULE_CATEGORY_LABELS.get(item.get("category", "personal"), "개인일정")
+        repeat_label = repeat_rule_to_text(item)
         await interaction.response.send_message(
             f"✅ 일정 등록 완료\n종류: {category_label}\n반복: {repeat_label}\n새로 !캘린더 입력하면 반영돼",
             ephemeral=True
         )
 
+
+
+class WeekdayScheduleModal(discord.ui.Modal, title="요일 선택 일정 등록"):
+    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25")
+    time_input = discord.ui.TextInput(label="시간", placeholder="18:00")
+    text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
+    category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            normalized_date = normalize_schedule_date(self.date.value)
+            normalized_time = normalize_schedule_time(self.time_input.value)
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+
+        token = str(uuid.uuid4())
+        PENDING_WEEKDAY_SCHEDULES[token] = {
+            "date": normalized_date,
+            "time": normalized_time,
+            "text": self.text.value.strip(),
+            "category": self.category_input.value,
+            "user_id": interaction.user.id,
+            "channel_id": interaction.channel_id,
+            "selected_days": set(),
+        }
+        view = WeekdayRepeatSelectView(token)
+        await interaction.response.send_message(
+            "반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼.",
+            view=view,
+            ephemeral=True
+        )
+
+class WeekdayToggleButton(discord.ui.Button):
+    def __init__(self, token: str, label: str, weekday_index: int, row: int):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=row)
+        self.token = token
+        self.weekday_index = weekday_index
+
+    async def callback(self, interaction: discord.Interaction):
+        pending = PENDING_WEEKDAY_SCHEDULES.get(self.token)
+        if not pending:
+            await interaction.response.send_message("등록 정보가 만료됐어. 다시 시도해줘.", ephemeral=True)
+            return
+        selected = pending["selected_days"]
+        if self.weekday_index in selected:
+            selected.remove(self.weekday_index)
+        else:
+            selected.add(self.weekday_index)
+        for child in self.view.children:
+            if isinstance(child, WeekdayToggleButton):
+                child.style = discord.ButtonStyle.success if child.weekday_index in selected else discord.ButtonStyle.secondary
+        selected_names = [WEEKDAY_KR[idx] for idx in sorted(selected)]
+        content = "반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼."
+        if selected_names:
+            content += f"\n현재 선택: {', '.join(selected_names)}"
+        await interaction.response.edit_message(content=content, view=self.view)
+
+class WeekdayQuickSetButton(discord.ui.Button):
+    def __init__(self, token: str, label: str, preset: list[int], row: int):
+        super().__init__(label=label, style=discord.ButtonStyle.primary, row=row)
+        self.token = token
+        self.preset = preset
+
+    async def callback(self, interaction: discord.Interaction):
+        pending = PENDING_WEEKDAY_SCHEDULES.get(self.token)
+        if not pending:
+            await interaction.response.send_message("등록 정보가 만료됐어. 다시 시도해줘.", ephemeral=True)
+            return
+        pending["selected_days"] = set(self.preset)
+        for child in self.view.children:
+            if isinstance(child, WeekdayToggleButton):
+                child.style = discord.ButtonStyle.success if child.weekday_index in pending["selected_days"] else discord.ButtonStyle.secondary
+        selected_names = [WEEKDAY_KR[idx] for idx in sorted(pending["selected_days"])]
+        await interaction.response.edit_message(
+            content="반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼.\n현재 선택: " + ", ".join(selected_names),
+            view=self.view
+        )
+
+class WeekdayRepeatSaveButton(discord.ui.Button):
+    def __init__(self, token: str):
+        super().__init__(label="완료", style=discord.ButtonStyle.success, row=2)
+        self.token = token
+
+    async def callback(self, interaction: discord.Interaction):
+        pending = PENDING_WEEKDAY_SCHEDULES.get(self.token)
+        if not pending:
+            await interaction.response.send_message("등록 정보가 만료됐어. 다시 시도해줘.", ephemeral=True)
+            return
+        repeat_days = sorted(pending["selected_days"])
+        if not repeat_days:
+            await interaction.response.send_message("최소 1개 요일을 선택해줘.", ephemeral=True)
+            return
+        item = build_schedule_item_from_values(
+            pending["date"],
+            pending["time"],
+            pending["text"],
+            interaction.user,
+            pending["channel_id"],
+            pending["category"],
+            "weekly",
+            repeat_days
+        )
+        PENDING_WEEKDAY_SCHEDULES.pop(self.token, None)
+        await interaction.response.edit_message(
+            content=f"✅ 일정 등록 완료\n종류: {get_schedule_category_label(item)}\n반복: {repeat_rule_to_text(item)}\n새로 !캘린더 입력하면 반영돼",
+            view=None
+        )
+
+class WeekdayRepeatCancelButton(discord.ui.Button):
+    def __init__(self, token: str):
+        super().__init__(label="취소", style=discord.ButtonStyle.danger, row=2)
+        self.token = token
+
+    async def callback(self, interaction: discord.Interaction):
+        PENDING_WEEKDAY_SCHEDULES.pop(self.token, None)
+        await interaction.response.edit_message(content="요일 선택 등록을 취소했어.", view=None)
+
+class WeekdayRepeatSelectView(discord.ui.View):
+    def __init__(self, token: str):
+        super().__init__(timeout=300)
+        self.token = token
+        labels = [("일", 6), ("월", 0), ("화", 1), ("수", 2), ("목", 3), ("금", 4), ("토", 5)]
+        for idx, (label, weekday_index) in enumerate(labels):
+            self.add_item(WeekdayToggleButton(token, label, weekday_index, row=0 if idx < 4 else 1))
+        self.add_item(WeekdayQuickSetButton(token, "평일", [0,1,2,3,4], row=1))
+        self.add_item(WeekdayQuickSetButton(token, "주말", [5,6], row=1))
+        self.add_item(WeekdayRepeatSaveButton(token))
+        self.add_item(WeekdayRepeatCancelButton(token))
+
+class AddScheduleChoiceView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="일반 등록", style=discord.ButtonStyle.success)
+    async def normal_add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddScheduleModal())
+
+    @discord.ui.button(label="요일 선택 등록", style=discord.ButtonStyle.primary)
+    async def weekday_add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(WeekdayScheduleModal())
 
 class AddSongModal(discord.ui.Modal, title="노래 추가"):
     song = discord.ui.TextInput(label="노래 제목 또는 URL", placeholder="예: 아이유 밤편지 / 유튜브 링크")
@@ -2075,7 +2234,7 @@ class CalendarView(discord.ui.View):
 
     @discord.ui.button(label="일정등록", style=discord.ButtonStyle.success, row=1)
     async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddScheduleModal())
+        await interaction.response.send_message("등록 방법을 골라줘", view=AddScheduleChoiceView(), ephemeral=True)
 
     @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
     async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
