@@ -11,19 +11,9 @@ import wavelink
 import calendar
 import uuid
 import unicodedata
-import re
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
-try:
-    from korean_lunar_calendar import KoreanLunarCalendar
-    LUNAR_AVAILABLE = True
-except Exception:
-    KoreanLunarCalendar = None
-    LUNAR_AVAILABLE = False
-from urllib.request import urlopen
-from urllib.parse import quote_plus
-import xml.etree.ElementTree as ET
 
 from dotenv import load_dotenv
 
@@ -257,457 +247,6 @@ PASTEL_COLORS = {
     "pastel_purple": {"label": "🍇 퍼플", "rgb": [200, 180, 255]},
 }
 DEFAULT_COLOR = PASTEL_COLORS["pastel_blue"]["rgb"]
-
-
-SCHEDULE_CATEGORY_LABELS = {
-    "personal": "개인일정",
-    "birthday": "생일일정",
-    "event": "이벤트일정",
-    "update": "업데이트일정",
-    "temp_holiday": "임시공휴일",
-}
-CATEGORY_FIXED_COLORS = {
-    "birthday": [255, 182, 193],
-    "event": [255, 218, 121],
-    "update": [174, 198, 255],
-    "temp_holiday": [235, 92, 92],
-}
-HOLIDAY_COLOR = (235, 92, 92)
-WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
-WEEKDAY_MAP = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
-
-
-HOLIDAY_API_KEY = os.getenv("KOREA_HOLIDAY_API_KEY") or os.getenv("DATA_GO_KR_SERVICE_KEY")
-HOLIDAY_CACHE_DIR = os.path.join(DATA_DIR, "holiday_cache")
-os.makedirs(HOLIDAY_CACHE_DIR, exist_ok=True)
-
-
-def _holiday_cache_path(year: int, month: int) -> str:
-    return os.path.join(HOLIDAY_CACHE_DIR, f"{year:04d}_{month:02d}.json")
-
-
-def _load_holiday_cache(year: int, month: int):
-    cache_path = _holiday_cache_path(year, month)
-    if not os.path.isfile(cache_path):
-        return None
-    try:
-        with open(cache_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {int(k): v for k, v in data.items()}
-    except Exception:
-        return None
-
-
-def _save_holiday_cache(year: int, month: int, holiday_map: dict):
-    cache_path = _holiday_cache_path(year, month)
-    try:
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump({str(k): v for k, v in holiday_map.items()}, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[공휴일 캐시 저장 실패] {e}")
-
-
-def _add_holiday_name(target: dict, day: int, name: str):
-    if day <= 0:
-        return
-    target.setdefault(day, [])
-    if name not in target[day]:
-        target[day].append(name)
-
-
-def _merge_holiday_map(base_map: dict, extra_map: dict):
-    for day, names in extra_map.items():
-        for name in names:
-            _add_holiday_name(base_map, int(day), name)
-
-
-def lunar_to_solar_date(year: int, lunar_month: int, lunar_day: int, is_leap: bool = False):
-    if not LUNAR_AVAILABLE:
-        return None
-    try:
-        cal = KoreanLunarCalendar()
-        cal.setLunarDate(year, lunar_month, lunar_day, is_leap)
-        return datetime.strptime(cal.SolarIsoFormat(), "%Y-%m-%d").date()
-    except Exception as e:
-        print(f"[음력 변환 실패] {e}")
-        return None
-
-
-def build_local_holiday_map(year: int, month: int):
-    holiday_map = {}
-
-    fixed_holidays = {
-        (1, 1): "신정",
-        (3, 1): "삼일절",
-        (5, 5): "어린이날",
-        (6, 6): "현충일",
-        (8, 15): "광복절",
-        (10, 3): "개천절",
-        (10, 9): "한글날",
-        (12, 25): "성탄절",
-    }
-
-    for (m, d), name in fixed_holidays.items():
-        if m == month:
-            _add_holiday_name(holiday_map, d, name)
-
-    if LUNAR_AVAILABLE:
-        seollal = lunar_to_solar_date(year, 1, 1)
-        chuseok = lunar_to_solar_date(year, 8, 15)
-        buddha = lunar_to_solar_date(year, 4, 8)
-
-        for base_date, name in [(seollal, "설날"), (chuseok, "추석")]:
-            if base_date:
-                holiday_dates = [
-                    (base_date - timedelta(days=1), f"{name} 연휴"),
-                    (base_date, name),
-                    (base_date + timedelta(days=1), f"{name} 연휴"),
-                ]
-                for dt_obj, holiday_name in holiday_dates:
-                    if dt_obj.year == year and dt_obj.month == month:
-                        _add_holiday_name(holiday_map, dt_obj.day, holiday_name)
-
-        if buddha and buddha.year == year and buddha.month == month:
-            _add_holiday_name(holiday_map, buddha.day, "부처님오신날")
-
-    # 대체공휴일 처리
-    substitute_candidates = []
-
-    def add_substitute_target(dates):
-        if not dates:
-            return
-        if any(dt.weekday() >= 5 for dt, _ in dates):
-            substitute_date = max(dt for dt, _ in dates) + timedelta(days=1)
-            existing_days = {dt for dt, _ in dates}
-            while substitute_date.weekday() >= 5 or substitute_date in existing_days:
-                substitute_date += timedelta(days=1)
-            substitute_candidates.append(substitute_date)
-
-    # 고정 공휴일 대체
-    substitute_fixed = [(3, 1, "삼일절"), (5, 5, "어린이날"), (8, 15, "광복절"), (10, 3, "개천절"), (10, 9, "한글날")]
-    for m, d, name in substitute_fixed:
-        dt_obj = datetime(year, m, d).date()
-        if dt_obj.weekday() >= 5:
-            substitute_candidates.append(dt_obj + timedelta(days=1))
-
-    # 음력/부처님오신날 대체
-    if LUNAR_AVAILABLE:
-        if buddha and buddha.weekday() >= 5:
-            substitute_candidates.append(buddha + timedelta(days=1))
-        if seollal:
-            holiday_dates = [(seollal - timedelta(days=1), "설날 연휴"), (seollal, "설날"), (seollal + timedelta(days=1), "설날 연휴")]
-            add_substitute_target(holiday_dates)
-        if chuseok:
-            holiday_dates = [(chuseok - timedelta(days=1), "추석 연휴"), (chuseok, "추석"), (chuseok + timedelta(days=1), "추석 연휴")]
-            add_substitute_target(holiday_dates)
-
-    for dt_obj in substitute_candidates:
-        if dt_obj.year == year and dt_obj.month == month:
-            _add_holiday_name(holiday_map, dt_obj.day, "대체공휴일")
-
-    return holiday_map
-
-
-def fetch_holiday_map_from_api(year: int, month: int):
-    if not HOLIDAY_API_KEY:
-        return None
-    try:
-        endpoint = "http://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
-        query = (
-            f"?serviceKey={quote_plus(HOLIDAY_API_KEY)}"
-            f"&solYear={year:04d}&solMonth={month:02d}"
-            "&_type=json"
-        )
-        with urlopen(endpoint + query, timeout=8) as response:
-            payload = response.read().decode("utf-8", errors="ignore")
-        data = json.loads(payload)
-        items = (((data.get("response") or {}).get("body") or {}).get("items") or {}).get("item")
-        if not items:
-            return {}
-        if isinstance(items, dict):
-            items = [items]
-        holiday_map = {}
-        for item in items:
-            locdate = str(item.get("locdate", ""))
-            date_name = str(item.get("dateName", "")).strip()
-            is_holiday = str(item.get("isHoliday", "Y")).upper() == "Y"
-            if len(locdate) == 8 and is_holiday:
-                day = int(locdate[-2:])
-                if date_name:
-                    _add_holiday_name(holiday_map, day, date_name)
-        return holiday_map
-    except Exception as e:
-        print(f"[공휴일 API 실패] {e}")
-        return None
-
-
-def get_month_holidays(year: int, month: int):
-    cached = _load_holiday_cache(year, month)
-    if cached:
-        holiday_map = cached
-    else:
-        api_map = fetch_holiday_map_from_api(year, month)
-        holiday_map = api_map if api_map is not None else build_local_holiday_map(year, month)
-        _save_holiday_cache(year, month, holiday_map)
-
-    # 임시공휴일 일정 병합
-    for item in schedule:
-        dt = parse_schedule_datetime(item.get("datetime", ""))
-        if dt is None or dt.year != year or dt.month != month:
-            continue
-        if item.get("category") == "temp_holiday":
-            _add_holiday_name(holiday_map, dt.day, item.get("text", "임시공휴일"))
-    return holiday_map
-
-
-def normalize_schedule_date(date_text: str) -> str:
-    raw = str(date_text or "").strip()
-    if not raw:
-        raise ValueError("날짜를 입력해줘")
-
-    compact = re.sub(r"\s+", "", raw)
-    compact = compact.replace(".", "-").replace("/", "-")
-    compact = compact.replace("년", "-").replace("월", "-").replace("일", "")
-    compact = re.sub(r"-+", "-", compact).strip("-")
-
-    if re.fullmatch(r"\d{8}", compact):
-        year = int(compact[:4])
-        month = int(compact[4:6])
-        day = int(compact[6:8])
-    else:
-        parts = [part for part in compact.split("-") if part]
-        if len(parts) != 3:
-            raise ValueError("날짜는 2026-03-25 또는 20260325처럼 입력해줘")
-        year, month, day = map(int, parts)
-
-    try:
-        normalized = datetime(year, month, day)
-    except ValueError:
-        raise ValueError("날짜를 다시 확인해줘")
-    return normalized.strftime("%Y-%m-%d")
-
-
-def normalize_schedule_time(time_text: str) -> str:
-    raw = str(time_text or "").strip()
-    if not raw:
-        raise ValueError("시간을 입력해줘")
-
-    compact = re.sub(r"\s+", "", raw)
-    compact = compact.replace(".", ":")
-
-    hour = None
-    minute = None
-
-    m = re.fullmatch(r"(\d{1,2})시(?:(\d{1,2})분?)?", compact)
-    if m:
-        hour = int(m.group(1))
-        minute = int(m.group(2) or 0)
-    elif re.fullmatch(r"\d{3,4}", compact):
-        if len(compact) == 3:
-            hour = int(compact[0])
-            minute = int(compact[1:])
-        else:
-            hour = int(compact[:2])
-            minute = int(compact[2:])
-    else:
-        normalized = compact.replace("시", ":").replace("분", "")
-        parts = [part for part in normalized.split(":") if part]
-        if len(parts) == 1 and parts[0].isdigit():
-            hour = int(parts[0])
-            minute = 0
-        elif len(parts) == 2:
-            hour, minute = map(int, parts)
-        else:
-            raise ValueError("시간은 18:00, 1800, 18시, 18시30분처럼 입력해줘")
-
-    if hour is None or minute is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError("시간을 다시 확인해줘")
-    return f"{hour:02d}:{minute:02d}"
-
-
-
-def parse_schedule_datetime(dt_str: str):
-    if not dt_str:
-        return None
-    normalized = str(dt_str).strip().replace(".", "-").replace("/", "-")
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(normalized, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def normalize_schedule_category(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    mapping = {
-        "": "personal",
-        "개인": "personal", "개인일정": "personal", "personal": "personal",
-        "생일": "birthday", "생일일정": "birthday", "birthday": "birthday",
-        "이벤트": "event", "이벤트일정": "event", "event": "event",
-        "업데이트": "update", "업데이트일정": "update", "update": "update",
-        "임시공휴일": "temp_holiday", "임공": "temp_holiday", "temp_holiday": "temp_holiday",
-    }
-    return mapping.get(raw, "personal")
-
-
-
-def normalize_repeat_input(value: str) -> str:
-    return re.sub(r"\s+", "", str(value or "").strip())
-
-
-def needs_weekday_selection(value: str) -> bool:
-    normalized = normalize_repeat_input(value).lower()
-    return normalized in {"요일반복", "주간반복", "weekly"}
-
-
-
-def build_schedule_item_from_values(normalized_date: str, normalized_time: str, text_value: str, user, channel_id: int, category_value: str, repeat_type: str = "none", repeat_days=None):
-    if repeat_days is None:
-        repeat_days = []
-    user_id = str(user.id)
-    user_name = user.display_name
-    color = user_colors.get(user_id, DEFAULT_COLOR)
-    category = normalize_schedule_category(category_value)
-    item = {
-        "datetime": f"{normalized_date} {normalized_time}",
-        "text": text_value.strip(),
-        "name": user_name,
-        "user_id": user.id,
-        "color": color,
-        "category": category,
-        "repeat_type": repeat_type,
-        "repeat_days": repeat_days,
-        "alert_enabled": False,
-        "alert_10min": False,
-        "channel_id": channel_id,
-    }
-    schedule.append(item)
-    save_schedule()
-    return item
-
-PENDING_WEEKDAY_SCHEDULES = {}
-
-def parse_repeat_rule(value: str):
-    raw = normalize_repeat_input(value)
-    if not raw or raw.lower() in {"없음", "안함", "none"}:
-        return "none", []
-    lowered = raw.lower()
-    if raw == "매일" or lowered == "daily":
-        return "daily", []
-    if raw == "매월" or lowered == "monthly":
-        return "monthly", []
-    if raw == "매년" or lowered == "yearly":
-        return "yearly", []
-    if raw == "평일":
-        return "weekly", [0, 1, 2, 3, 4]
-    if raw == "주말":
-        return "weekly", [5, 6]
-
-    days = []
-    for key, weekday in WEEKDAY_MAP.items():
-        if key in raw:
-            days.append(weekday)
-    if days:
-        return "weekly", sorted(set(days))
-    return "none", []
-
-
-def repeat_rule_to_text(item: dict) -> str:
-    repeat_type = item.get("repeat_type", "none")
-    repeat_days = item.get("repeat_days", [])
-    if repeat_type == "daily":
-        return "매일"
-    if repeat_type == "monthly":
-        return "매월"
-    if repeat_type == "yearly":
-        return "매년"
-    if repeat_type == "weekly":
-        labels = [WEEKDAY_KR[idx] for idx in repeat_days if isinstance(idx, int) and 0 <= idx <= 6]
-        return "요일반복(" + ",".join(labels) + ")" if labels else "요일반복"
-    return "반복없음"
-
-
-def resolve_schedule_color(item: dict):
-    category = item.get("category", "personal")
-    if category == "personal":
-        color = item.get("color", DEFAULT_COLOR)
-        if isinstance(color, list) and len(color) == 3:
-            return tuple(color)
-        return tuple(DEFAULT_COLOR)
-    fixed = CATEGORY_FIXED_COLORS.get(category)
-    if fixed:
-        return tuple(fixed)
-    return tuple(DEFAULT_COLOR)
-
-
-def get_schedule_category_label(item: dict) -> str:
-    return SCHEDULE_CATEGORY_LABELS.get(item.get("category", "personal"), "개인일정")
-
-
-def schedule_occurs_on_date(item: dict, target_date):
-    dt = parse_schedule_datetime(item.get("datetime", ""))
-    if dt is None:
-        return False
-    base_date = dt.date()
-    if target_date < base_date:
-        return False
-    repeat_type = item.get("repeat_type", "none")
-    repeat_days = item.get("repeat_days", [])
-    if repeat_type == "daily":
-        return True
-    if repeat_type == "monthly":
-        return base_date.day == target_date.day
-    if repeat_type == "yearly":
-        return base_date.month == target_date.month and base_date.day == target_date.day
-    if repeat_type == "weekly":
-        return target_date.weekday() in repeat_days
-    return base_date == target_date
-
-
-def format_schedule_detail(item: dict, index: int | None = None) -> str:
-    parts = []
-    if index is not None:
-        parts.append(f"번호: {index + 1}")
-    parts.extend([
-        f"날짜시각: {item.get('datetime', '-')}",
-        f"종류: {get_schedule_category_label(item)}",
-        f"반복: {repeat_rule_to_text(item)}",
-        f"내용: {item.get('text', '-')}",
-        f"등록자: {item.get('name', '사용자')}",
-        f"알림: {'켜짐' if item.get('alert_enabled') else '꺼짐'}",
-    ])
-    return "\n".join(parts)
-
-
-def find_matching_schedules(keyword: str):
-    keyword = str(keyword or "").strip().lower()
-    if not keyword:
-        return []
-    results = []
-    for idx, item in enumerate(schedule):
-        haystacks = [
-            str(item.get("datetime", "")),
-            str(item.get("text", "")),
-            str(item.get("name", "")),
-            get_schedule_category_label(item),
-            repeat_rule_to_text(item),
-        ]
-        normalized = " ".join(haystacks).lower()
-        score = 0
-        if keyword in normalized:
-            score += 100
-        compact_norm = normalized.replace("-", "").replace(":", "").replace(" ", "")
-        compact_key = keyword.replace("-", "").replace(":", "").replace(" ", "")
-        if compact_key and compact_key in compact_norm:
-            score += 50
-        for part in keyword.split():
-            if part and part in normalized:
-                score += 10
-        if score > 0:
-            results.append((score, idx, item))
-    results.sort(key=lambda x: (-x[0], x[1]))
-    return results
 
 # =========================
 # 음악 설정
@@ -1282,13 +821,16 @@ def extract_artist_title(song: str):
 
 def get_month_schedule_map(year: int, month: int):
     date_map = {}
-    _, last_day = calendar.monthrange(year, month)
-    for day in range(1, last_day + 1):
-        target_date = datetime(year, month, day).date()
-        items = [item for item in schedule if schedule_occurs_on_date(item, target_date)]
-        if items:
-            items.sort(key=lambda entry: (parse_schedule_datetime(entry.get("datetime", "")) or datetime.max).time())
-            date_map[day] = items
+    for item in schedule:
+        dt_str = item.get("datetime", "")
+        try:
+            dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+
+        if dt.year == year and dt.month == month:
+            date_map.setdefault(dt.day, []).append(item)
+
     return date_map
 
 
@@ -1347,7 +889,7 @@ async def send_schedule_list_message(target):
     lines = []
     for i, item in enumerate(schedule, start=1):
         alert_text = "🔔" if item.get("alert_enabled") else "—"
-        lines.append(f"{i}. {item['datetime']} | {get_schedule_category_label(item)} | {item['text']} | {repeat_rule_to_text(item)} | {item.get('name', '사용자')} | {alert_text}")
+        lines.append(f"{i}. {item['datetime']} | {item['text']} | {item.get('name', '사용자')} | {alert_text}")
 
     text = "\n".join(lines)
     for chunk in split_text(text, 1800):
@@ -1542,7 +1084,7 @@ def create_calendar_image(year: int, month: int):
     title_w = bbox[2] - bbox[0]
     draw.text(((width - title_w) / 2, 78), title, fill=title_color, font=title_font)
 
-    days = ["일", "월", "화", "수", "목", "금", "토"]
+    days = ["월", "화", "수", "목", "금", "토", "일"]
     grid_left = 105
     grid_top = 210
     cell_w = 124
@@ -1561,10 +1103,9 @@ def create_calendar_image(year: int, month: int):
         tw = bbox[2] - bbox[0]
         draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 160), day_name, fill=color, font=header_font)
 
-    cal = calendar.Calendar(firstweekday=6)
+    cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(year, month)
     date_map = get_month_schedule_map(year, month)
-    holiday_map = get_month_holidays(year, month)
 
     now = datetime.now()
     is_current_month = (now.year == year and now.month == month)
@@ -1724,7 +1265,7 @@ class ScheduleListButton(discord.ui.Button):
         lines = []
         for i, item in enumerate(schedule, start=1):
             alert_text = "🔔" if item.get("alert_enabled") else "—"
-            lines.append(f"{i}. {item['datetime']} | {get_schedule_category_label(item)} | {item['text']} | {repeat_rule_to_text(item)} | {item.get('name', '사용자')} | {alert_text}")
+            lines.append(f"{i}. {item['datetime']} | {item['text']} | {item.get('name', '사용자')} | {alert_text}")
 
         text = "\n".join(lines)
         chunks = split_text(text, 1800)
@@ -1775,198 +1316,29 @@ class ColorButton(discord.ui.Button):
 # 모달 UI
 # =========================
 class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
-    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25 또는 20260325")
-    time_input = discord.ui.TextInput(label="시간", placeholder="18:00 또는 18시")
+    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25")
+    time_input = discord.ui.TextInput(label="시간", placeholder="18:00")
     text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
-    category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False)
-    repeat_input = discord.ui.TextInput(label="반복 설정", placeholder="없음 / 매일 / 매월 / 매년 / 요일반복", required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
-        try:
-            normalized_date = normalize_schedule_date(self.date.value)
-            normalized_time = normalize_schedule_time(self.time_input.value)
-        except ValueError as e:
-            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
-            return
+        user_id = str(interaction.user.id)
+        user_name = interaction.user.display_name
+        color = user_colors.get(user_id, DEFAULT_COLOR)
 
-        if needs_weekday_selection(self.repeat_input.value):
-            token = str(uuid.uuid4())
-            PENDING_WEEKDAY_SCHEDULES[token] = {
-                "date": normalized_date,
-                "time": normalized_time,
-                "text": self.text.value.strip(),
-                "category": self.category_input.value,
-                "user_id": interaction.user.id,
-                "channel_id": interaction.channel_id,
-                "selected_days": set(),
-            }
-            view = WeekdayRepeatSelectView(token)
-            await interaction.response.send_message(
-                "반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼.",
-                view=view,
-                ephemeral=True
-            )
-            return
-
-        repeat_type, repeat_days = parse_repeat_rule(self.repeat_input.value)
-        item = build_schedule_item_from_values(
-            normalized_date,
-            normalized_time,
-            self.text.value,
-            interaction.user,
-            interaction.channel_id,
-            self.category_input.value,
-            repeat_type,
-            repeat_days
-        )
-
-        category_label = SCHEDULE_CATEGORY_LABELS.get(item.get("category", "personal"), "개인일정")
-        repeat_label = repeat_rule_to_text(item)
-        await interaction.response.send_message(
-            f"✅ 일정 등록 완료\n종류: {category_label}\n반복: {repeat_label}\n새로 !캘린더 입력하면 반영돼",
-            ephemeral=True
-        )
-
-
-class WeekdayScheduleModal(discord.ui.Modal, title="요일 선택 일정 등록"):
-    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25 또는 20260325")
-    time_input = discord.ui.TextInput(label="시간", placeholder="18:00 또는 18시")
-    text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
-    category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            normalized_date = normalize_schedule_date(self.date.value)
-            normalized_time = normalize_schedule_time(self.time_input.value)
-        except ValueError as e:
-            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
-            return
-
-        token = str(uuid.uuid4())
-        PENDING_WEEKDAY_SCHEDULES[token] = {
-            "date": normalized_date,
-            "time": normalized_time,
-            "text": self.text.value.strip(),
-            "category": self.category_input.value,
+        schedule.append({
+            "datetime": f"{self.date.value} {self.time_input.value}",
+            "text": self.text.value,
+            "name": user_name,
             "user_id": interaction.user.id,
-            "channel_id": interaction.channel_id,
-            "selected_days": set(),
-        }
-        view = WeekdayRepeatSelectView(token)
-        await interaction.response.send_message(
-            "반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼.",
-            view=view,
-            ephemeral=True
-        )
+            "color": color,
+            "alert_enabled": False,
+            "alert_10min": False,
+            "channel_id": interaction.channel_id
+        })
+        save_schedule()
+        await interaction.response.send_message("✅ 일정 등록 완료\n새로 !캘린더 입력하면 반영돼", ephemeral=True)
 
-class WeekdayToggleButton(discord.ui.Button):
-    def __init__(self, token: str, label: str, weekday_index: int, row: int):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=row)
-        self.token = token
-        self.weekday_index = weekday_index
 
-    async def callback(self, interaction: discord.Interaction):
-        pending = PENDING_WEEKDAY_SCHEDULES.get(self.token)
-        if not pending:
-            await interaction.response.send_message("등록 정보가 만료됐어. 다시 시도해줘.", ephemeral=True)
-            return
-        selected = pending["selected_days"]
-        if self.weekday_index in selected:
-            selected.remove(self.weekday_index)
-        else:
-            selected.add(self.weekday_index)
-        for child in self.view.children:
-            if isinstance(child, WeekdayToggleButton):
-                child.style = discord.ButtonStyle.success if child.weekday_index in selected else discord.ButtonStyle.secondary
-        selected_names = [WEEKDAY_KR[idx] for idx in sorted(selected)]
-        content = "반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼."
-        if selected_names:
-            content += f"\n현재 선택: {', '.join(selected_names)}"
-        await interaction.response.edit_message(content=content, view=self.view)
-
-class WeekdayQuickSetButton(discord.ui.Button):
-    def __init__(self, token: str, label: str, preset: list[int], row: int):
-        super().__init__(label=label, style=discord.ButtonStyle.primary, row=row)
-        self.token = token
-        self.preset = preset
-
-    async def callback(self, interaction: discord.Interaction):
-        pending = PENDING_WEEKDAY_SCHEDULES.get(self.token)
-        if not pending:
-            await interaction.response.send_message("등록 정보가 만료됐어. 다시 시도해줘.", ephemeral=True)
-            return
-        pending["selected_days"] = set(self.preset)
-        for child in self.view.children:
-            if isinstance(child, WeekdayToggleButton):
-                child.style = discord.ButtonStyle.success if child.weekday_index in pending["selected_days"] else discord.ButtonStyle.secondary
-        selected_names = [WEEKDAY_KR[idx] for idx in sorted(pending["selected_days"])]
-        await interaction.response.edit_message(
-            content="반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼.\n현재 선택: " + ", ".join(selected_names),
-            view=self.view
-        )
-
-class WeekdayRepeatSaveButton(discord.ui.Button):
-    def __init__(self, token: str):
-        super().__init__(label="완료", style=discord.ButtonStyle.success, row=2)
-        self.token = token
-
-    async def callback(self, interaction: discord.Interaction):
-        pending = PENDING_WEEKDAY_SCHEDULES.get(self.token)
-        if not pending:
-            await interaction.response.send_message("등록 정보가 만료됐어. 다시 시도해줘.", ephemeral=True)
-            return
-        repeat_days = sorted(pending["selected_days"])
-        if not repeat_days:
-            await interaction.response.send_message("최소 1개 요일을 선택해줘.", ephemeral=True)
-            return
-        item = build_schedule_item_from_values(
-            pending["date"],
-            pending["time"],
-            pending["text"],
-            interaction.user,
-            pending["channel_id"],
-            pending["category"],
-            "weekly",
-            repeat_days
-        )
-        PENDING_WEEKDAY_SCHEDULES.pop(self.token, None)
-        await interaction.response.edit_message(
-            content=f"✅ 일정 등록 완료\n종류: {get_schedule_category_label(item)}\n반복: {repeat_rule_to_text(item)}\n새로 !캘린더 입력하면 반영돼",
-            view=None
-        )
-
-class WeekdayRepeatCancelButton(discord.ui.Button):
-    def __init__(self, token: str):
-        super().__init__(label="취소", style=discord.ButtonStyle.danger, row=2)
-        self.token = token
-
-    async def callback(self, interaction: discord.Interaction):
-        PENDING_WEEKDAY_SCHEDULES.pop(self.token, None)
-        await interaction.response.edit_message(content="요일 선택 등록을 취소했어.", view=None)
-
-class WeekdayRepeatSelectView(discord.ui.View):
-    def __init__(self, token: str):
-        super().__init__(timeout=300)
-        self.token = token
-        labels = [("일", 6), ("월", 0), ("화", 1), ("수", 2), ("목", 3), ("금", 4), ("토", 5)]
-        for idx, (label, weekday_index) in enumerate(labels):
-            self.add_item(WeekdayToggleButton(token, label, weekday_index, row=0 if idx < 4 else 1))
-        self.add_item(WeekdayQuickSetButton(token, "평일", [0,1,2,3,4], row=1))
-        self.add_item(WeekdayQuickSetButton(token, "주말", [5,6], row=1))
-        self.add_item(WeekdayRepeatSaveButton(token))
-        self.add_item(WeekdayRepeatCancelButton(token))
-
-class AddScheduleChoiceView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
-
-    @discord.ui.button(label="일반 등록", style=discord.ButtonStyle.success)
-    async def normal_add(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddScheduleModal())
-
-    @discord.ui.button(label="요일 선택 등록", style=discord.ButtonStyle.primary)
-    async def weekday_add(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WeekdayScheduleModal())
 
 class AddSongModal(discord.ui.Modal, title="노래 추가"):
     song = discord.ui.TextInput(label="노래 제목 또는 URL", placeholder="예: 아이유 밤편지 / 유튜브 링크")
@@ -2309,7 +1681,7 @@ class CalendarView(discord.ui.View):
 
     @discord.ui.button(label="일정등록", style=discord.ButtonStyle.success, row=1)
     async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("등록 방법을 골라줘", view=AddScheduleChoiceView(), ephemeral=True)
+        await interaction.response.send_modal(AddScheduleModal())
 
     @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
     async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
