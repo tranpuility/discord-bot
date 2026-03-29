@@ -15,13 +15,6 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
 
-try:
-    from korean_lunar_calendar import KoreanLunarCalendar
-    LUNAR_CALENDAR_AVAILABLE = True
-except ImportError:
-    KoreanLunarCalendar = None
-    LUNAR_CALENDAR_AVAILABLE = False
-
 from dotenv import load_dotenv
 
 # =========================
@@ -254,24 +247,6 @@ PASTEL_COLORS = {
     "pastel_purple": {"label": "🍇 퍼플", "rgb": [200, 180, 255]},
 }
 DEFAULT_COLOR = PASTEL_COLORS["pastel_blue"]["rgb"]
-
-SCHEDULE_CATEGORY_LABELS = {
-    "personal": "개인일정",
-    "birthday": "생일일정",
-    "event": "이벤트일정",
-    "update": "업데이트일정",
-    "temp_holiday": "임시공휴일",
-}
-CATEGORY_FIXED_COLORS = {
-    "birthday": [255, 182, 193],
-    "event": [255, 218, 121],
-    "update": [174, 198, 255],
-    "temp_holiday": [235, 92, 92],
-}
-HOLIDAY_COLOR = (235, 92, 92)
-WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
-WEEKDAY_MAP = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
-
 
 # =========================
 # 음악 설정
@@ -709,204 +684,6 @@ async def try_resolve_player_with_fallback(query: str):
 # =========================
 # 파일 저장 / 불러오기
 # =========================
-
-def normalize_schedule_date(date_text: str) -> str:
-    cleaned = str(date_text).strip().replace(".", "-").replace("/", "-")
-    parts = [part for part in cleaned.split("-") if part]
-    if len(parts) != 3:
-        raise ValueError("날짜 형식은 YYYY-MM-DD 로 입력해줘")
-    year, month, day = map(int, parts)
-    return f"{year:04d}-{month:02d}-{day:02d}"
-
-
-def normalize_schedule_time(time_text: str) -> str:
-    cleaned = str(time_text).strip().replace(".", ":")
-    parts = [part for part in cleaned.split(":") if part]
-    if len(parts) != 2:
-        raise ValueError("시간 형식은 HH:MM 으로 입력해줘")
-    hour, minute = map(int, parts)
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError("시간 범위를 다시 확인해줘")
-    return f"{hour:02d}:{minute:02d}"
-
-
-def parse_schedule_datetime(dt_str: str):
-    if not dt_str:
-        return None
-    normalized = str(dt_str).strip().replace(".", "-").replace("/", "-")
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(normalized, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def normalize_schedule_category(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    mapping = {
-        "": "personal",
-        "개인": "personal", "개인일정": "personal", "personal": "personal",
-        "생일": "birthday", "생일일정": "birthday", "birthday": "birthday",
-        "이벤트": "event", "이벤트일정": "event", "event": "event",
-        "업데이트": "update", "업데이트일정": "update", "update": "update",
-        "임시공휴일": "temp_holiday", "임공": "temp_holiday", "temp_holiday": "temp_holiday", "temporary_holiday": "temp_holiday",
-    }
-    return mapping.get(raw, "personal")
-
-
-def parse_repeat_rule(value: str):
-    raw = str(value or "").strip().replace(" ", "")
-    if not raw or raw.lower() in {"없음", "안함", "none"}:
-        return "none", []
-
-    lowered = raw.lower()
-    if raw == "매일" or lowered == "daily":
-        return "daily", []
-    if raw == "매월" or lowered == "monthly":
-        return "monthly", []
-    if raw == "매년" or lowered == "yearly":
-        return "yearly", []
-    if raw == "평일":
-        return "weekly", [0, 1, 2, 3, 4]
-    if raw == "주말":
-        return "weekly", [5, 6]
-
-    days = []
-    for key, weekday in WEEKDAY_MAP.items():
-        if key in raw:
-            days.append(weekday)
-    if days:
-        return "weekly", sorted(set(days))
-
-    return "none", []
-
-
-def repeat_rule_to_text(item: dict) -> str:
-    repeat_type = item.get("repeat_type", "none")
-    repeat_days = item.get("repeat_days", [])
-    if repeat_type == "daily":
-        return "매일"
-    if repeat_type == "monthly":
-        return "매월"
-    if repeat_type == "yearly":
-        return "매년"
-    if repeat_type == "weekly":
-        labels = [WEEKDAY_KR[idx] for idx in repeat_days if isinstance(idx, int) and 0 <= idx <= 6]
-        return "요일반복(" + ",".join(labels) + ")" if labels else "요일반복"
-    return "반복없음"
-
-
-def resolve_schedule_color(item: dict):
-    category = item.get("category", "personal")
-    if category == "personal":
-        color = item.get("color", DEFAULT_COLOR)
-        if isinstance(color, list) and len(color) == 3:
-            return tuple(color)
-        return tuple(DEFAULT_COLOR)
-    fixed = CATEGORY_FIXED_COLORS.get(category)
-    if fixed:
-        return tuple(fixed)
-    return tuple(DEFAULT_COLOR)
-
-
-def get_schedule_category_label(item: dict) -> str:
-    return SCHEDULE_CATEGORY_LABELS.get(item.get("category", "personal"), "개인일정")
-
-
-def schedule_occurs_on_date(item: dict, target_date):
-    dt = parse_schedule_datetime(item.get("datetime", ""))
-    if dt is None:
-        return False
-
-    base_date = dt.date()
-    if target_date < base_date:
-        return False
-
-    repeat_type = item.get("repeat_type", "none")
-    repeat_days = item.get("repeat_days", [])
-
-    if repeat_type == "daily":
-        return True
-    if repeat_type == "monthly":
-        return base_date.day == target_date.day
-    if repeat_type == "yearly":
-        return base_date.month == target_date.month and base_date.day == target_date.day
-    if repeat_type == "weekly":
-        return target_date.weekday() in repeat_days
-
-    return base_date == target_date
-
-
-def lunar_to_solar(year: int, month: int, day: int, intercalation: bool = False):
-    if not LUNAR_CALENDAR_AVAILABLE or KoreanLunarCalendar is None:
-        return None
-    calendar_obj = KoreanLunarCalendar()
-    calendar_obj.setLunarDate(year, month, day, intercalation)
-    return datetime.strptime(calendar_obj.SolarIsoFormat(), "%Y-%m-%d").date()
-
-
-def get_korean_holidays(year: int):
-    holidays = {}
-
-    def add_holiday(dt, name):
-        holidays.setdefault(dt, [])
-        if name not in holidays[dt]:
-            holidays[dt].append(name)
-
-    for month, day, name in [
-        (1, 1, "신정"),
-        (3, 1, "삼일절"),
-        (5, 5, "어린이날"),
-        (6, 6, "현충일"),
-        (8, 15, "광복절"),
-        (10, 3, "개천절"),
-        (10, 9, "한글날"),
-        (12, 25, "성탄절"),
-    ]:
-        add_holiday(datetime(year, month, day).date(), name)
-
-    seollal = lunar_to_solar(year, 1, 1)
-    if seollal is not None:
-        add_holiday(seollal - timedelta(days=1), "설날 연휴")
-        add_holiday(seollal, "설날")
-        add_holiday(seollal + timedelta(days=1), "설날 연휴")
-
-    buddha = lunar_to_solar(year, 4, 8)
-    if buddha is not None:
-        add_holiday(buddha, "부처님오신날")
-
-    chuseok = lunar_to_solar(year, 8, 15)
-    if chuseok is not None:
-        add_holiday(chuseok - timedelta(days=1), "추석 연휴")
-        add_holiday(chuseok, "추석")
-        add_holiday(chuseok + timedelta(days=1), "추석 연휴")
-
-    def add_substitute(base_dates, name):
-        if any(base.weekday() >= 5 for base in base_dates):
-            sub = max(base_dates) + timedelta(days=1)
-            while sub in holidays or sub.weekday() >= 5:
-                sub += timedelta(days=1)
-            add_holiday(sub, name)
-
-    add_substitute([datetime(year, 3, 1).date()], "삼일절 대체공휴일")
-    add_substitute([datetime(year, 5, 5).date()], "어린이날 대체공휴일")
-    if buddha is not None:
-        add_substitute([buddha], "부처님오신날 대체공휴일")
-    add_substitute([datetime(year, 8, 15).date()], "광복절 대체공휴일")
-    add_substitute([datetime(year, 10, 3).date()], "개천절 대체공휴일")
-    add_substitute([datetime(year, 10, 9).date()], "한글날 대체공휴일")
-    if seollal is not None:
-        add_substitute([seollal - timedelta(days=1), seollal, seollal + timedelta(days=1)], "설날 대체공휴일")
-    if chuseok is not None:
-        add_substitute([chuseok - timedelta(days=1), chuseok, chuseok + timedelta(days=1)], "추석 대체공휴일")
-
-    return holidays
-
-
-def get_month_holidays(year: int, month: int):
-    return {dt.day: names for dt, names in get_korean_holidays(year).items() if dt.month == month}
-
 def save_schedule():
     with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
         json.dump(schedule, f, ensure_ascii=False, indent=2)
@@ -994,26 +771,23 @@ def load_music_data():
 # 공통 유틸
 # =========================
 def resolve_font_path():
-    candidates = []
-    for base in [BASE_DIR, os.getcwd(), "/mnt/data", DATA_DIR]:
-        if not base:
-            continue
-        candidates.extend([os.path.join(base, "onglefont.ttf"), os.path.join(base, "온글잎 박다현체.ttf")])
-        try:
-            for name in os.listdir(base):
-                if not name.lower().endswith(".ttf"):
-                    continue
-                full = os.path.join(base, name)
-                normalized = unicodedata.normalize("NFC", name)
-                if normalized in {"onglefont.ttf", "온글잎 박다현체.ttf"} or "박다현" in normalized or "온글잎" in normalized or "onglefont" in normalized.lower():
-                    return full
-                candidates.append(full)
-        except Exception:
-            pass
-
+    candidates = [
+        os.path.join(BASE_DIR, "onglefont.ttf"),
+        os.path.join(BASE_DIR, "온글잎 박다현체.ttf"),
+        os.path.join(DATA_DIR, "onglefont.ttf"),
+        os.path.join(DATA_DIR, "온글잎 박다현체.ttf"),
+        "/app/onglefont.ttf",
+        "/app/온글잎 박다현체.ttf",
+    ]
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
             return candidate
+    try:
+        for name in os.listdir(BASE_DIR):
+            if name.lower().endswith(".ttf"):
+                return os.path.join(BASE_DIR, name)
+    except Exception:
+        pass
     return None
 
 
@@ -1025,7 +799,7 @@ def get_font(size: int):
         except Exception as e:
             print(f"[폰트 오류] {e} | path={font_path}")
     else:
-        print("[폰트 오류] onglefont.ttf 파일을 찾지 못함")
+        print("[폰트 오류] 온글잎 박다현체.ttf 파일을 찾지 못함")
     return ImageFont.load_default()
 
 def safe_text(text: str, limit: int):
@@ -1047,13 +821,16 @@ def extract_artist_title(song: str):
 
 def get_month_schedule_map(year: int, month: int):
     date_map = {}
-    _, last_day = calendar.monthrange(year, month)
-    for day in range(1, last_day + 1):
-        target_date = datetime(year, month, day).date()
-        items = [item for item in schedule if schedule_occurs_on_date(item, target_date)]
-        if items:
-            items.sort(key=lambda entry: (parse_schedule_datetime(entry.get("datetime", "")) or datetime.max).time())
-            date_map[day] = items
+    for item in schedule:
+        dt_str = item.get("datetime", "")
+        try:
+            dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+
+        if dt.year == year and dt.month == month:
+            date_map.setdefault(dt.day, []).append(item)
+
     return date_map
 
 
@@ -1112,14 +889,11 @@ async def send_schedule_list_message(target):
     lines = []
     for i, item in enumerate(schedule, start=1):
         alert_text = "🔔" if item.get("alert_enabled") else "—"
-        category_label = get_schedule_category_label(item)
-        repeat_text = repeat_rule_to_text(item)
-        lines.append(f"{i}. {item['datetime']} | {category_label} | {item['text']} | {repeat_text} | {item.get('name', '사용자')} | {alert_text}")
+        lines.append(f"{i}. {item['datetime']} | {item['text']} | {item.get('name', '사용자')} | {alert_text}")
 
     text = "\n".join(lines)
     for chunk in split_text(text, 1800):
         await target.send(f"```{chunk}```")
-
 
 
 # =========================
@@ -1129,14 +903,14 @@ async def check_schedule():
     await bot.wait_until_ready()
 
     while not bot.is_closed():
-        now_dt = datetime.now()
-        now = now_dt.strftime("%Y-%m-%d %H:%M")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         for item in schedule:
+            event_dt = item.get("datetime")
             channel_id = item.get("channel_id")
             user_id = item.get("user_id")
 
-            if not channel_id:
+            if not event_dt or not channel_id:
                 continue
 
             channel = bot.get_channel(channel_id)
@@ -1144,17 +918,12 @@ async def check_schedule():
                 continue
 
             if item.get("alert_enabled", False):
-                event_time = parse_schedule_datetime(item.get("datetime", ""))
-                if event_time is None:
+                try:
+                    event_time = datetime.strptime(event_dt, "%Y-%m-%d %H:%M")
+                except ValueError:
                     continue
 
-                if not schedule_occurs_on_date(item, now_dt.date()):
-                    continue
-
-                today_event_dt = datetime.combine(now_dt.date(), event_time.time())
-                event_dt_key = today_event_dt.strftime("%Y-%m-%d %H:%M")
-
-                if event_dt_key not in sent_alerts and now == event_dt_key:
+                if event_dt not in sent_alerts and now == event_dt:
                     try:
                         await channel.send(f"🔔 {item['name']}님의 일정 알림: {item['text']}")
                     except Exception:
@@ -1170,15 +939,15 @@ async def check_schedule():
 
                         if user:
                             try:
-                                await user.send(f"🔔 일정 알림: {item['text']} ({event_dt_key})")
+                                await user.send(f"🔔 일정 알림: {item['text']} ({event_dt})")
                             except Exception:
                                 pass
 
-                    sent_alerts.add(event_dt_key)
+                    sent_alerts.add(event_dt)
 
                 if item.get("alert_10min", False):
-                    before_dt = (today_event_dt - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M")
-                    before_key = f"{event_dt_key}_10min"
+                    before_dt = (event_time - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M")
+                    before_key = f"{event_dt}_10min"
 
                     if before_key not in sent_alerts and now == before_dt:
                         try:
@@ -1196,14 +965,13 @@ async def check_schedule():
 
                             if user:
                                 try:
-                                    await user.send(f"⏰ 10분 전 알림: {item['text']} ({event_dt_key})")
+                                    await user.send(f"⏰ 10분 전 알림: {item['text']} ({event_dt})")
                                 except Exception:
                                     pass
 
                         sent_alerts.add(before_key)
 
         await asyncio.sleep(30)
-
 
 
 # =========================
@@ -1338,7 +1106,6 @@ def create_calendar_image(year: int, month: int):
     cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(year, month)
     date_map = get_month_schedule_map(year, month)
-    holiday_map = get_month_holidays(year, month)
 
     now = datetime.now()
     is_current_month = (now.year == year and now.month == month)
@@ -1366,12 +1133,19 @@ def create_calendar_image(year: int, month: int):
 
             draw.text((x1 + 12, y1 + 10), str(day_num), fill=day_color, font=day_font)
 
+            holiday_names = holiday_map.get(day_num, [])
+            if holiday_names:
+                holiday_text = safe_text(", ".join(holiday_names), 10)
+                draw.text((x1 + 10, y1 + 30), holiday_text, fill=HOLIDAY_COLOR, font=schedule_font)
+
             items = date_map.get(day_num, [])
-            preview_y = y1 + 40
+            preview_y = y1 + (54 if holiday_names else 40)
 
             for idx, item in enumerate(items[:2]):
-                preview = safe_text(item["text"], 9)
-                draw.text((x1 + 10, preview_y + idx * 18), preview, fill=(85, 83, 92), font=schedule_font)
+                dt = parse_schedule_datetime(item.get("datetime", ""))
+                time_text = dt.strftime("%H:%M") if dt else "--:--"
+                preview = safe_text(f"{time_text} {item['text']}", 12)
+                draw.text((x1 + 10, preview_y + idx * 18), preview, fill=resolve_schedule_color(item), font=schedule_font)
 
             if len(items) > 2:
                 more_text = f"+{len(items) - 2}"
@@ -1382,21 +1156,27 @@ def create_calendar_image(year: int, month: int):
     draw.text((section_x1 + 18, section_y1 + 16), "오늘 일정", fill=title_color, font=bottom_title_font)
 
     today_items = []
-    for item in schedule:
-        dt_str = item.get("datetime", "")
-        try:
-            dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
-        except ValueError:
-            continue
+    today_holidays = []
+    if is_current_month:
+        today_holidays = holiday_map.get(now.day, [])
+        for item in schedule:
+            if schedule_occurs_on_date(item, now.date()):
+                today_items.append(item)
 
-        if dt.year == year and dt.month == month and is_current_month and dt.day == now.day:
-            today_items.append(item)
+    y_cursor = section_y1 + 48
+    if today_holidays:
+        for holiday_name in today_holidays[:2]:
+            draw.text((section_x1 + 18, y_cursor), f"- {holiday_name}", fill=HOLIDAY_COLOR, font=bottom_text_font)
+            y_cursor += 22
 
     if today_items:
         for idx, item in enumerate(today_items[:3]):
-            line = f"- {item['datetime'][11:16]} {item['text']}"
-            draw.text((section_x1 + 18, section_y1 + 48 + idx * 24), line, fill=text_main, font=bottom_text_font)
-    else:
+            dt = parse_schedule_datetime(item.get("datetime", ""))
+            time_text = dt.strftime("%H:%M") if dt else "--:--"
+            line = f"- {time_text} {safe_text(item['text'], 18)}"
+            draw.text((section_x1 + 18, y_cursor), line, fill=resolve_schedule_color(item), font=bottom_text_font)
+            y_cursor += 24
+    elif not today_holidays:
         draw.text((section_x1 + 18, section_y1 + 52), "오늘 일정 없음", fill=(135, 131, 142), font=bottom_text_font)
 
     output_file = os.path.join(BASE_DIR, f"calendar_{year}_{month}_{uuid.uuid4().hex[:8]}.png")
@@ -1434,14 +1214,14 @@ class HelpView(discord.ui.View):
             "!캘린더 2026 03\n"
             "!일정추가 날짜 시간 내용\n"
             "!일정삭제 번호\n"
-            "!일정목록"
+            "!일정목록\n\n일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n반복 설정: 없음 / 매일 / 매월 / 매년 / 월,수,금 / 평일 / 주말"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
 
 class HelpButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
+        super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_message("보고 싶은 기능을 골라줘", view=HelpView(), ephemeral=True)
@@ -1458,7 +1238,7 @@ class ScheduleHelpButton(discord.ui.Button):
             "!캘린더 2026 03\n"
             "!일정추가 날짜 시간 내용\n"
             "!일정삭제 번호\n"
-            "!일정목록"
+            "!일정목록\n\n일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n반복 설정: 없음 / 매일 / 매월 / 매년 / 월,수,금 / 평일 / 주말"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -1475,7 +1255,7 @@ class ScheduleListButton(discord.ui.Button):
         lines = []
         for i, item in enumerate(schedule, start=1):
             alert_text = "🔔" if item.get("alert_enabled") else "—"
-            lines.append(f"{i}. {item['datetime']} | {get_schedule_category_label(item)} | {item['text']} | {repeat_rule_to_text(item)} | {alert_text}")
+            lines.append(f"{i}. {item['datetime']} | {item['text']} | {item.get('name', '사용자')} | {alert_text}")
 
         text = "\n".join(lines)
         chunks = split_text(text, 1800)
@@ -1529,44 +1309,24 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
     date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25")
     time_input = discord.ui.TextInput(label="시간", placeholder="18:00")
     text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
-    category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False, default="개인")
-    repeat_input = discord.ui.TextInput(label="반복 설정", placeholder="없음 / 매일 / 매월 / 매년 / 월,수,금", required=False, default="없음")
 
     async def on_submit(self, interaction: discord.Interaction):
-        try:
-            normalized_date = normalize_schedule_date(self.date.value)
-            normalized_time = normalize_schedule_time(self.time_input.value)
-        except ValueError as e:
-            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
-            return
-
-        repeat_type, repeat_days = parse_repeat_rule(self.repeat_input.value)
         user_id = str(interaction.user.id)
         user_name = interaction.user.display_name
         color = user_colors.get(user_id, DEFAULT_COLOR)
-        category = normalize_schedule_category(self.category_input.value)
 
         schedule.append({
-            "datetime": f"{normalized_date} {normalized_time}",
-            "text": self.text.value.strip(),
+            "datetime": f"{self.date.value} {self.time_input.value}",
+            "text": self.text.value,
             "name": user_name,
             "user_id": interaction.user.id,
             "color": color,
-            "category": category,
-            "repeat_type": repeat_type,
-            "repeat_days": repeat_days,
             "alert_enabled": False,
             "alert_10min": False,
             "channel_id": interaction.channel_id
         })
         save_schedule()
-
-        category_label = SCHEDULE_CATEGORY_LABELS.get(category, "개인일정")
-        repeat_label = repeat_rule_to_text(schedule[-1])
-        await interaction.response.send_message(
-            f"✅ 일정 등록 완료\n종류: {category_label}\n반복: {repeat_label}\n새로 !캘린더 입력하면 반영돼",
-            ephemeral=True
-        )
+        await interaction.response.send_message("✅ 일정 등록 완료\n새로 !캘린더 입력하면 반영돼", ephemeral=True)
 
 
 
@@ -1604,7 +1364,7 @@ class ScheduleSelect(discord.ui.Select):
         options = []
         for i, item in enumerate(schedule):
             label = safe_text(f"{item['datetime']} / {item['text']}", 100)
-            description = safe_text(f"{get_schedule_category_label(item)} / {repeat_rule_to_text(item)}", 100)
+            description = safe_text(f"{item.get('name', '사용자')}", 100)
             options.append(discord.SelectOption(label=label, description=description, value=str(i)))
 
         if not options:
@@ -1689,6 +1449,190 @@ class MusicDeleteView(discord.ui.View):
         super().__init__(timeout=60)
         self.add_item(MusicDeleteSelect(guild_id))
 
+
+
+class GoToMonthModal(discord.ui.Modal, title="월 이동"):
+    year_input = discord.ui.TextInput(label="연도", placeholder="2026")
+    month_input = discord.ui.TextInput(label="월", placeholder="3")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            year = int(str(self.year_input.value).strip())
+            month = int(str(self.month_input.value).strip())
+            if not (1 <= month <= 12):
+                raise ValueError
+        except Exception:
+            await interaction.response.send_message("❌ 연도/월을 다시 확인해줘. 예: 2026 / 3", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        file_path = await asyncio.to_thread(create_calendar_image, year, month)
+        await interaction.message.edit(attachments=[discord.File(file_path)], view=FinalCalendarView(year, month))
+
+
+class GoToMonthButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="📅 월이동", style=discord.ButtonStyle.secondary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(GoToMonthModal())
+
+
+class ScheduleSearchModal(discord.ui.Modal, title="일정 검색"):
+    keyword = discord.ui.TextInput(
+        label="검색어",
+        placeholder="날짜 / 시간 / 내용 / 이름 아무거나 입력",
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        results = find_matching_schedules(self.keyword.value)
+        if not results:
+            await interaction.response.send_message("검색 결과가 없어", ephemeral=True)
+            return
+
+        lines = []
+        for _, idx, item in results[:10]:
+            lines.append(format_schedule_detail(item, idx))
+            lines.append("")
+
+        await interaction.response.send_message("```" + "\n".join(lines).strip() + "```", ephemeral=True)
+
+
+class ScheduleSearchButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="🔎 일정검색", style=discord.ButtonStyle.secondary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ScheduleSearchModal())
+
+
+class ScheduleViewSelect(discord.ui.Select):
+    def __init__(self):
+        options = []
+        for i, item in enumerate(schedule[:25]):
+            label = safe_text(f"{item['datetime']} / {item['text']}", 100)
+            desc = safe_text(f"{get_schedule_category_label(item)} / {repeat_rule_to_text(item)}", 100)
+            options.append(discord.SelectOption(label=label, description=desc, value=str(i)))
+
+        if not options:
+            options.append(discord.SelectOption(label="등록된 일정 없음", value="none"))
+
+        super().__init__(placeholder="확인할 일정을 선택해줘", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
+            return
+        idx = int(self.values[0])
+        await interaction.response.send_message("```" + format_schedule_detail(schedule[idx], idx) + "```", ephemeral=True)
+
+
+class ScheduleViewSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        self.add_item(ScheduleViewSelect())
+
+
+class ScheduleViewButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="📋 일정보기", style=discord.ButtonStyle.secondary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not schedule:
+            await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
+            return
+        await interaction.response.send_message("확인할 일정을 골라줘", view=ScheduleViewSelectView(), ephemeral=True)
+
+
+class AddScheduleButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="➕ 일정등록", style=discord.ButtonStyle.success, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddScheduleModal())
+
+
+class DeleteScheduleButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="🗑 일정삭제", style=discord.ButtonStyle.danger, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not schedule:
+            await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
+            return
+        await interaction.response.send_message("삭제할 일정을 골라줘", view=ScheduleSelectView("delete"), ephemeral=True)
+
+
+class AddAlertButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="🔔 알림등록", style=discord.ButtonStyle.primary, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not schedule:
+            await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
+            return
+        await interaction.response.send_message("알림 등록할 일정을 골라줘", view=ScheduleSelectView("add_alert"), ephemeral=True)
+
+
+class DeleteAlertButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="🔕 알림삭제", style=discord.ButtonStyle.secondary, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not schedule:
+            await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
+            return
+        await interaction.response.send_message("알림 삭제할 일정을 골라줘", view=ScheduleSelectView("delete_alert"), ephemeral=True)
+
+
+class CalendarOptionView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(ColorButton())
+        self.add_item(ScheduleViewButton())
+        self.add_item(ScheduleSearchButton())
+        self.add_item(AddScheduleButton())
+        self.add_item(DeleteScheduleButton())
+        self.add_item(AddAlertButton())
+        self.add_item(DeleteAlertButton())
+
+
+class OptionButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="⚙ 옵션", style=discord.ButtonStyle.secondary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message("원하는 기능을 골라줘", view=CalendarOptionView(), ephemeral=True)
+
+
+class FinalCalendarView(discord.ui.View):
+    def __init__(self, year, month):
+        super().__init__(timeout=3600)
+        self.year = year
+        self.month = month
+        self.add_item(GoToMonthButton())
+        self.add_item(HelpButton())
+        self.add_item(OptionButton())
+
+    @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        self.month -= 1
+        if self.month < 1:
+            self.month = 12
+            self.year -= 1
+        file_path = await asyncio.to_thread(create_calendar_image, self.year, self.month)
+        await interaction.message.edit(attachments=[discord.File(file_path)], view=FinalCalendarView(self.year, self.month))
+
+    @discord.ui.button(label="다음달 ▶", style=discord.ButtonStyle.secondary, row=0)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        self.month += 1
+        if self.month > 12:
+            self.month = 1
+            self.year += 1
+        file_path = await asyncio.to_thread(create_calendar_image, self.year, self.month)
+        await interaction.message.edit(attachments=[discord.File(file_path)], view=FinalCalendarView(self.year, self.month))
 
 # =========================
 # 캘린더 UI
@@ -2468,7 +2412,7 @@ async def show_calendar(ctx, year: int = None, month: int = None):
     month = month or now.month
 
     file_path = await asyncio.to_thread(create_calendar_image, year, month)
-    view = CalendarView(year, month)
+    view = FinalCalendarView(year, month)
     await ctx.send(file=discord.File(file_path), view=view)
 
 
