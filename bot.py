@@ -11,6 +11,7 @@ import wavelink
 import calendar
 import uuid
 import unicodedata
+import re
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
@@ -460,23 +461,69 @@ def get_month_holidays(year: int, month: int):
 
 
 def normalize_schedule_date(date_text: str) -> str:
-    cleaned = str(date_text).strip().replace(".", "-").replace("/", "-")
-    parts = [part for part in cleaned.split("-") if part]
-    if len(parts) != 3:
-        raise ValueError("날짜 형식은 YYYY-MM-DD 로 입력해줘")
-    year, month, day = map(int, parts)
-    return f"{year:04d}-{month:02d}-{day:02d}"
+    raw = str(date_text or "").strip()
+    if not raw:
+        raise ValueError("날짜를 입력해줘")
+
+    compact = re.sub(r"\s+", "", raw)
+    compact = compact.replace(".", "-").replace("/", "-")
+    compact = compact.replace("년", "-").replace("월", "-").replace("일", "")
+    compact = re.sub(r"-+", "-", compact).strip("-")
+
+    if re.fullmatch(r"\d{8}", compact):
+        year = int(compact[:4])
+        month = int(compact[4:6])
+        day = int(compact[6:8])
+    else:
+        parts = [part for part in compact.split("-") if part]
+        if len(parts) != 3:
+            raise ValueError("날짜는 2026-03-25 또는 20260325처럼 입력해줘")
+        year, month, day = map(int, parts)
+
+    try:
+        normalized = datetime(year, month, day)
+    except ValueError:
+        raise ValueError("날짜를 다시 확인해줘")
+    return normalized.strftime("%Y-%m-%d")
 
 
 def normalize_schedule_time(time_text: str) -> str:
-    cleaned = str(time_text).strip().replace(".", ":")
-    parts = [part for part in cleaned.split(":") if part]
-    if len(parts) != 2:
-        raise ValueError("시간 형식은 HH:MM 으로 입력해줘")
-    hour, minute = map(int, parts)
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError("시간 범위를 다시 확인해줘")
+    raw = str(time_text or "").strip()
+    if not raw:
+        raise ValueError("시간을 입력해줘")
+
+    compact = re.sub(r"\s+", "", raw)
+    compact = compact.replace(".", ":")
+
+    hour = None
+    minute = None
+
+    m = re.fullmatch(r"(\d{1,2})시(?:(\d{1,2})분?)?", compact)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+    elif re.fullmatch(r"\d{3,4}", compact):
+        if len(compact) == 3:
+            hour = int(compact[0])
+            minute = int(compact[1:])
+        else:
+            hour = int(compact[:2])
+            minute = int(compact[2:])
+    else:
+        normalized = compact.replace("시", ":").replace("분", "")
+        parts = [part for part in normalized.split(":") if part]
+        if len(parts) == 1 and parts[0].isdigit():
+            hour = int(parts[0])
+            minute = 0
+        elif len(parts) == 2:
+            hour, minute = map(int, parts)
+        else:
+            raise ValueError("시간은 18:00, 1800, 18시, 18시30분처럼 입력해줘")
+
+    if hour is None or minute is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("시간을 다시 확인해줘")
     return f"{hour:02d}:{minute:02d}"
+
 
 
 def parse_schedule_datetime(dt_str: str):
@@ -502,6 +549,16 @@ def normalize_schedule_category(value: str) -> str:
         "임시공휴일": "temp_holiday", "임공": "temp_holiday", "temp_holiday": "temp_holiday",
     }
     return mapping.get(raw, "personal")
+
+
+
+def normalize_repeat_input(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip())
+
+
+def needs_weekday_selection(value: str) -> bool:
+    normalized = normalize_repeat_input(value).lower()
+    return normalized in {"요일반복", "주간반복", "weekly"}
 
 
 
@@ -532,7 +589,7 @@ def build_schedule_item_from_values(normalized_date: str, normalized_time: str, 
 PENDING_WEEKDAY_SCHEDULES = {}
 
 def parse_repeat_rule(value: str):
-    raw = str(value or "").strip().replace(" ", "")
+    raw = normalize_repeat_input(value)
     if not raw or raw.lower() in {"없음", "안함", "none"}:
         return "none", []
     lowered = raw.lower()
@@ -1495,10 +1552,10 @@ def create_calendar_image(year: int, month: int):
 
     for i, day_name in enumerate(days):
         color = text_main
-        if i == 0:
-            color = sun_red
-        elif i == 6:
+        if i == 5:
             color = sat_blue
+        elif i == 6:
+            color = sun_red
 
         bbox = draw.textbbox((0, 0), day_name, font=header_font)
         tw = bbox[2] - bbox[0]
@@ -1525,10 +1582,10 @@ def create_calendar_image(year: int, month: int):
                 continue
 
             day_color = text_main
-            if col_idx == 0:
-                day_color = sun_red
-            elif col_idx == 6:
+            if col_idx == 5:
                 day_color = sat_blue
+            elif col_idx == 6:
+                day_color = sun_red
 
             if is_current_month and day_num == now.day:
                 draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=today_fill, outline=today_outline, width=4)
@@ -1718,8 +1775,8 @@ class ColorButton(discord.ui.Button):
 # 모달 UI
 # =========================
 class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
-    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25")
-    time_input = discord.ui.TextInput(label="시간", placeholder="18:00")
+    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25 또는 20260325")
+    time_input = discord.ui.TextInput(label="시간", placeholder="18:00 또는 18시")
     text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
     category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False)
     repeat_input = discord.ui.TextInput(label="반복 설정", placeholder="없음 / 매일 / 매월 / 매년 / 요일반복", required=False)
@@ -1730,6 +1787,25 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
             normalized_time = normalize_schedule_time(self.time_input.value)
         except ValueError as e:
             await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+
+        if needs_weekday_selection(self.repeat_input.value):
+            token = str(uuid.uuid4())
+            PENDING_WEEKDAY_SCHEDULES[token] = {
+                "date": normalized_date,
+                "time": normalized_time,
+                "text": self.text.value.strip(),
+                "category": self.category_input.value,
+                "user_id": interaction.user.id,
+                "channel_id": interaction.channel_id,
+                "selected_days": set(),
+            }
+            view = WeekdayRepeatSelectView(token)
+            await interaction.response.send_message(
+                "반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼.",
+                view=view,
+                ephemeral=True
+            )
             return
 
         repeat_type, repeat_days = parse_repeat_rule(self.repeat_input.value)
@@ -1752,10 +1828,9 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
         )
 
 
-
 class WeekdayScheduleModal(discord.ui.Modal, title="요일 선택 일정 등록"):
-    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25")
-    time_input = discord.ui.TextInput(label="시간", placeholder="18:00")
+    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25 또는 20260325")
+    time_input = discord.ui.TextInput(label="시간", placeholder="18:00 또는 18시")
     text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
     category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False)
 
