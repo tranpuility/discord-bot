@@ -8,5 +8,5 @@ __pycache__/
 *.log
 *.png
 *.pdf
-*.ttf
 ffmpeg-*
+!onglefont.ttf
