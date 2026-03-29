@@ -64,7 +64,18 @@ intents.message_content = True
 intents.voice_states = True
 intents.members = True
 
-bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
+class SlashBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
+
+    async def setup_hook(self):
+        try:
+            synced_global = await self.tree.sync()
+            print(f"[setup_hook] 글로벌 슬래시 동기화 완료: {len(synced_global)}개", flush=True)
+        except Exception as e:
+            print(f"[setup_hook] 글로벌 슬래시 동기화 실패: {e}", flush=True)
+
+bot = SlashBot()
 
 
 def make_queue_item(channel_id: int | None, query: str):
@@ -2531,15 +2542,27 @@ class MusicView(discord.ui.View):
 @bot.event
 async def on_ready():
     global schedule_task_started, slash_sync_done
-    print(f"로그인 완료: {bot.user}")
+    print(f"로그인 완료: {bot.user}", flush=True)
 
     if not slash_sync_done:
         try:
-            synced = await bot.tree.sync()
+            synced_global = await bot.tree.sync()
+            print(f"슬래시 명령어 글로벌 동기화 완료: {len(synced_global)}개", flush=True)
+
+            guild_sync_count = 0
+            for guild in bot.guilds:
+                try:
+                    bot.tree.copy_global_to(guild=guild)
+                    synced_guild = await bot.tree.sync(guild=guild)
+                    guild_sync_count += len(synced_guild)
+                    print(f"길드 슬래시 동기화 완료: {guild.name} ({guild.id}) / {len(synced_guild)}개", flush=True)
+                except Exception as guild_error:
+                    print(f"길드 슬래시 동기화 실패: {guild.name} ({guild.id}) / {guild_error}", flush=True)
+
             slash_sync_done = True
-            print(f"슬래시 명령어 동기화 완료: {len(synced)}개")
+            print(f"슬래시 명령어 동기화 완료: 글로벌 {len(synced_global)}개, 길드 누적 {guild_sync_count}개", flush=True)
         except Exception as e:
-            print(f"슬래시 명령어 동기화 실패: {e}")
+            print(f"슬래시 명령어 동기화 실패: {e}", flush=True)
 
     try:
         load_schedule()
