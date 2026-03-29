@@ -815,6 +815,19 @@ def split_text(text: str, size: int = 1900):
     return [text[i:i + size] for i in range(0, len(text), size)]
 
 
+def format_schedule_detail(item: dict, index: int | None = None):
+    title = "📌 일정 상세" if index is None else f"📌 일정 상세 ({index + 1}번)"
+    alert_text = "켜짐" if item.get("alert_enabled") else "꺼짐"
+    lines = [
+        title,
+        f"일시: {item.get('datetime', '-')}",
+        f"내용: {item.get('text', '-')}",
+        f"등록자: {item.get('name', '사용자')}",
+        f"알림: {alert_text}",
+    ]
+    return "\n".join(lines)
+
+
 def extract_artist_title(song: str):
     if " - " in song:
         artist, title = song.split(" - ", 1)
@@ -1054,6 +1067,7 @@ async def play_next(guild_id: int):
 # =========================
 # 캘린더 이미지 생성
 # =========================
+
 def create_calendar_image(year: int, month: int):
     width, height = 1100, 1300
     image = Image.new("RGB", (width, height), (20, 20, 24))
@@ -1068,71 +1082,63 @@ def create_calendar_image(year: int, month: int):
     sat_blue = (120, 146, 227)
     sun_red = (222, 128, 134)
     today_outline = (246, 102, 102)
-    today_fill = (255, 248, 249)
-    today_text = (214, 92, 92)
+    today_fill = (250, 247, 248)
     section_bg = (236, 234, 239)
 
-    title_font = get_font(46)
-    header_font = get_font(24)
+    title_font = get_font(44)
+    header_font = get_font(22)
     day_font = get_font(24)
-    schedule_font = get_font(15)
-    today_schedule_font = get_font(19)
-    bottom_title_font = get_font(28)
-    bottom_text_font = get_font(21)
-    bottom_time_font = get_font(19)
-    bottom_empty_font = get_font(20)
+    schedule_font = get_font(14)
+    today_schedule_font = get_font(16)
+    bottom_title_font = get_font(24)
+    bottom_text_font = get_font(18)
 
-    def fit_text(value: str, max_chars: int = 8):
+    def normalize_rgb(value, fallback):
+        if isinstance(value, (list, tuple)) and len(value) >= 3:
+            try:
+                return tuple(int(max(0, min(255, channel))) for channel in value[:3])
+            except Exception:
+                return fallback
+        return fallback
+
+    def wrap_text_lines(value: str, max_chars: int, max_lines: int):
         value = (value or "").strip()
-        return value if len(value) <= max_chars else value[:max_chars - 1] + "…"
-
-    def wrap_text_lines(value: str, max_width: int, font, max_lines: int = 2):
-        words = (value or "").strip().split()
-        if not words:
-            return []
+        if not value:
+            return [""]
 
         lines = []
-        current = words[0]
+        current = ""
 
-        for word in words[1:]:
-            test = f"{current} {word}"
-            bbox = draw.textbbox((0, 0), test, font=font)
-            if bbox[2] - bbox[0] <= max_width:
-                current = test
-            else:
+        for ch in value:
+            if len(current) >= max_chars:
                 lines.append(current)
-                current = word
-                if len(lines) >= max_lines - 1:
-                    break
+                current = ch
+            else:
+                current += ch
 
-        if len(lines) < max_lines:
+        if current:
             lines.append(current)
 
         if len(lines) > max_lines:
             lines = lines[:max_lines]
-
-        if len(lines) == max_lines:
-            bbox = draw.textbbox((0, 0), lines[-1], font=font)
-            while lines[-1] and (bbox[2] - bbox[0]) > max_width:
-                lines[-1] = lines[-1][:-1]
-                bbox = draw.textbbox((0, 0), lines[-1] + "…", font=font)
-            if lines[-1] != current or len(words) > len(" ".join(lines).split()):
-                lines[-1] = lines[-1].rstrip() + "…"
-
+            if lines[-1]:
+                lines[-1] = lines[-1][:-1] + "…"
+            else:
+                lines[-1] = "…"
         return lines
 
-    card_x1, card_y1, card_x2, card_y2 = 55, 40, 1045, 1215
+    card_x1, card_y1, card_x2, card_y2 = 55, 40, 1045, 1235
     draw.rounded_rectangle((card_x1, card_y1, card_x2, card_y2), radius=28, fill=card_bg, outline=card_outline, width=3)
     draw.rounded_rectangle((card_x1 + 12, card_y1 + 12, card_x2 - 12, card_y2 - 12), radius=24, outline=(232, 228, 237), width=2)
 
     title = f"{year}년 {month:02d}월"
     bbox = draw.textbbox((0, 0), title, font=title_font)
     title_w = bbox[2] - bbox[0]
-    draw.text(((width - title_w) / 2, 72), title, fill=title_color, font=title_font)
+    draw.text(((width - title_w) / 2, 74), title, fill=title_color, font=title_font)
 
     days = ["월", "화", "수", "목", "금", "토", "일"]
     grid_left = 105
-    grid_top = 205
+    grid_top = 210
     cell_w = 124
     cell_h = 110
     gap_x = 10
@@ -1147,7 +1153,7 @@ def create_calendar_image(year: int, month: int):
 
         bbox = draw.textbbox((0, 0), day_name, font=header_font)
         tw = bbox[2] - bbox[0]
-        draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 154), day_name, fill=color, font=header_font)
+        draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 156), day_name, fill=color, font=header_font)
 
     cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(year, month)
@@ -1163,12 +1169,7 @@ def create_calendar_image(year: int, month: int):
             x2 = x1 + cell_w
             y2 = y1 + cell_h
 
-            is_today = is_current_month and day_num == now.day and day_num != 0
-            fill_color = today_fill if is_today else cell_bg
-            outline_color = today_outline if is_today else cell_outline
-            outline_width = 4 if is_today else 2
-
-            draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=fill_color, outline=outline_color, width=outline_width)
+            draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=cell_bg, outline=cell_outline, width=2)
 
             if day_num == 0:
                 continue
@@ -1178,28 +1179,33 @@ def create_calendar_image(year: int, month: int):
                 day_color = sat_blue
             elif col_idx == 6:
                 day_color = sun_red
+
+            is_today = is_current_month and day_num == now.day
             if is_today:
-                day_color = today_text
+                draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=today_fill, outline=today_outline, width=4)
 
             draw.text((x1 + 12, y1 + 8), str(day_num), fill=day_color, font=day_font)
 
             items = date_map.get(day_num, [])
-            preview_y = y1 + 42
+            preview_y = y1 + 38
+            preview_font = today_schedule_font if is_today else schedule_font
+            line_step = 18 if is_today else 16
 
             for idx, item in enumerate(items[:2]):
-                preview_font = today_schedule_font if is_today else schedule_font
-                preview_color = today_text if is_today else (85, 83, 92)
-                preview = fit_text(item["text"], 7 if is_today else 8)
-                draw.text((x1 + 10, preview_y + idx * (24 if is_today else 20)), preview, fill=preview_color, font=preview_font)
+                item_color = normalize_rgb(item.get("color"), (85, 83, 92))
+                time_text = item.get("datetime", "")[11:16] if len(item.get("datetime", "")) >= 16 else ""
+                raw_text = item.get("text", "")
+                first_line = wrap_text_lines(raw_text, 5 if is_today else 6, 1)[0]
+                preview = f"{time_text} {first_line}".strip()
+                draw.text((x1 + 10, preview_y + idx * line_step), preview, fill=item_color, font=preview_font)
 
             if len(items) > 2:
                 more_text = f"+{len(items) - 2}"
-                more_color = today_text if is_today else (120, 115, 130)
-                draw.text((x1 + 10, y1 + 86), more_text, fill=more_color, font=schedule_font)
+                draw.text((x1 + 10, preview_y + 2 * line_step), more_text, fill=(120, 115, 130), font=preview_font)
 
-    section_x1, section_y1, section_x2, section_y2 = 92, 1035, 1008, 1178
-    draw.rounded_rectangle((section_x1, section_y1, section_x2, section_y2), radius=20, fill=section_bg, outline=cell_outline, width=2)
-    draw.text((section_x1 + 18, section_y1 + 12), "오늘 일정", fill=title_color, font=bottom_title_font)
+    section_x1, section_y1, section_x2, section_y2 = 95, 1028, 1005, 1198
+    draw.rounded_rectangle((section_x1, section_y1, section_x2, section_y2), radius=18, fill=section_bg, outline=cell_outline, width=2)
+    draw.text((section_x1 + 18, section_y1 + 14), "오늘 일정", fill=title_color, font=bottom_title_font)
 
     today_items = []
     for item in schedule:
@@ -1213,19 +1219,25 @@ def create_calendar_image(year: int, month: int):
             today_items.append(item)
 
     if today_items:
-        base_y = section_y1 + 54
-        for idx, item in enumerate(today_items[:3]):
-            row_y = base_y + idx * 34
-            time_text = item["datetime"][11:16]
-            content_text = item["text"]
+        current_y = section_y1 + 52
+        for item in today_items[:4]:
+            item_color = normalize_rgb(item.get("color"), text_main)
+            time_text = item.get("datetime", "")[11:16] if len(item.get("datetime", "")) >= 16 else "--:--"
+            wrapped = wrap_text_lines(item.get("text", ""), 28, 2)
+            draw.text((section_x1 + 18, current_y), f"• {time_text}", fill=item_color, font=bottom_text_font)
 
-            draw.text((section_x1 + 18, row_y), time_text, fill=today_text, font=bottom_time_font)
+            text_x = section_x1 + 88
+            for line_idx, line in enumerate(wrapped):
+                draw.text((text_x, current_y + line_idx * 22), line, fill=item_color, font=bottom_text_font)
 
-            wrapped = wrap_text_lines(content_text, max_width=section_x2 - section_x1 - 120, font=bottom_text_font, max_lines=1)
-            line_text = wrapped[0] if wrapped else content_text
-            draw.text((section_x1 + 94, row_y - 1), line_text, fill=text_main, font=bottom_text_font)
+            current_y += 26 + (len(wrapped) - 1) * 22
+            if current_y > section_y2 - 28:
+                remain_count = len(today_items) - today_items[:4].index(item) - 1
+                if remain_count > 0:
+                    draw.text((section_x1 + 18, section_y2 - 28), f"...외 {remain_count}개", fill=(135, 131, 142), font=bottom_text_font)
+                break
     else:
-        draw.text((section_x1 + 18, section_y1 + 60), "오늘 일정 없음", fill=(135, 131, 142), font=bottom_empty_font)
+        draw.text((section_x1 + 18, section_y1 + 60), "오늘 일정 없음", fill=(135, 131, 142), font=bottom_text_font)
 
     output_file = os.path.join(BASE_DIR, f"calendar_{year}_{month}_{uuid.uuid4().hex[:8]}.png")
     image.save(output_file)
@@ -1291,6 +1303,7 @@ class ScheduleHelpButton(discord.ui.Button):
         await interaction.response.send_message(text, ephemeral=True)
 
 
+
 class ScheduleListButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="📋 일정리스트", style=discord.ButtonStyle.secondary, row=0)
@@ -1340,14 +1353,55 @@ class ColorSelect(discord.ui.Select):
         await interaction.response.send_message(f"🎨 색 설정 완료: {PASTEL_COLORS[selected_key]['label']}", ephemeral=True)
 
 
-class ColorButton(discord.ui.Button):
+class ScheduleOptionsView(discord.ui.View):
     def __init__(self):
-        super().__init__(label="🎨 색 선택", style=discord.ButtonStyle.secondary, row=0)
+        super().__init__(timeout=120)
 
-    async def callback(self, interaction: discord.Interaction):
+    @discord.ui.button(label="🎨 색선택", style=discord.ButtonStyle.secondary, row=0)
+    async def color_pick(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = discord.ui.View()
         view.add_item(ColorSelect())
         await interaction.response.send_message("색을 보고 골라줘", view=view, ephemeral=True)
+
+    @discord.ui.button(label="📋 일정보기", style=discord.ButtonStyle.secondary, row=0)
+    async def view_schedule(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not schedule:
+            await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
+            return
+        await interaction.response.send_message("보고 싶은 일정을 골라줘", view=ScheduleSelectView("detail"), ephemeral=True)
+
+    @discord.ui.button(label="➕ 일정등록", style=discord.ButtonStyle.success, row=0)
+    async def add_schedule(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddScheduleModal())
+
+    @discord.ui.button(label="🗑 일정삭제", style=discord.ButtonStyle.danger, row=1)
+    async def delete_schedule(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not schedule:
+            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
+            return
+        await interaction.response.send_message("🗑️ 삭제할 일정을 골라줘", view=ScheduleSelectView("delete"), ephemeral=True)
+
+    @discord.ui.button(label="🔔 알림등록", style=discord.ButtonStyle.primary, row=2)
+    async def add_alert(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not schedule:
+            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
+            return
+        await interaction.response.send_message("🔔 알림 등록할 일정을 골라줘", view=ScheduleSelectView("add_alert"), ephemeral=True)
+
+    @discord.ui.button(label="🔕 알림삭제", style=discord.ButtonStyle.secondary, row=2)
+    async def delete_alert(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not schedule:
+            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
+            return
+        await interaction.response.send_message("🔕 알림 삭제할 일정을 골라줘", view=ScheduleSelectView("delete_alert"), ephemeral=True)
+
+
+class ScheduleOptionsButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="⚙️ 옵션", style=discord.ButtonStyle.primary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message("원하는 기능을 골라줘", view=ScheduleOptionsView(), ephemeral=True)
 
 
 # =========================
@@ -1418,7 +1472,14 @@ class ScheduleSelect(discord.ui.Select):
         if not options:
             options.append(discord.SelectOption(label="등록된 일정 없음", value="none"))
 
-        super().__init__(placeholder="일정을 선택해줘", options=options[:25])
+        placeholder_map = {
+            "delete": "삭제할 일정을 선택해줘",
+            "add_alert": "알림 등록할 일정을 선택해줘",
+            "delete_alert": "알림 삭제할 일정을 선택해줘",
+            "detail": "상세 보기할 일정을 선택해줘",
+            "edit": "수정할 일정을 선택해줘",
+        }
+        super().__init__(placeholder=placeholder_map.get(action_type, "일정을 선택해줘"), options=options[:25])
 
     async def callback(self, interaction: discord.Interaction):
         if self.values[0] == "none":
@@ -1447,6 +1508,12 @@ class ScheduleSelect(discord.ui.Select):
             schedule[idx]["alert_10min"] = False
             save_schedule()
             await interaction.response.send_message(f"🔕 알림 삭제 완료: {schedule[idx]['datetime']} / {schedule[idx]['text']}", ephemeral=True)
+
+        elif self.action_type == "detail":
+            await interaction.response.send_message(format_schedule_detail(schedule[idx], idx), ephemeral=True)
+
+        elif self.action_type == "edit":
+            await interaction.response.send_modal(EditScheduleModal(idx))
 
 
 class MusicDeleteSelect(discord.ui.Select):
@@ -1501,15 +1568,13 @@ class MusicDeleteView(discord.ui.View):
 # =========================
 # 캘린더 UI
 # =========================
+
 class CalendarView(discord.ui.View):
     def __init__(self, year, month):
         super().__init__(timeout=3600)
         self.year = year
         self.month = month
-
-        self.add_item(ColorButton())
-        self.add_item(ScheduleListButton())
-        self.add_item(ScheduleHelpButton())
+        self.add_item(ScheduleOptionsButton())
 
     @discord.ui.button(label="◀ 이전달", style=discord.ButtonStyle.secondary, row=0)
     async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1532,34 +1597,6 @@ class CalendarView(discord.ui.View):
 
         file_path = await asyncio.to_thread(create_calendar_image, self.year, self.month)
         await interaction.message.edit(attachments=[discord.File(file_path)], view=self)
-
-    @discord.ui.button(label="일정등록", style=discord.ButtonStyle.success, row=1)
-    async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddScheduleModal())
-
-    @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
-    async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not schedule:
-            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
-            return
-
-        await interaction.response.send_message("🗑️ 삭제할 일정을 골라줘", view=ScheduleSelectView("delete"), ephemeral=True)
-
-    @discord.ui.button(label="알림등록", style=discord.ButtonStyle.primary, row=1)
-    async def add_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not schedule:
-            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
-            return
-
-        await interaction.response.send_message("🔔 알림 등록할 일정을 골라줘", view=ScheduleSelectView("add_alert"), ephemeral=True)
-
-    @discord.ui.button(label="알림삭제", style=discord.ButtonStyle.secondary, row=1)
-    async def delete_alert_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not schedule:
-            await interaction.response.send_message("📋 등록된 일정이 없어", ephemeral=True)
-            return
-
-        await interaction.response.send_message("🔕 알림 삭제할 일정을 골라줘", view=ScheduleSelectView("delete_alert"), ephemeral=True)
 
 
 # =========================
