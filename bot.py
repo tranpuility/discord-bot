@@ -581,42 +581,6 @@ def schedule_occurs_on_date(item: dict, target_date):
     return base_date == target_date
 
 
-def get_korean_holidays(year: int):
-    holidays = {}
-
-    def add(dt_obj, name):
-        holidays.setdefault(dt_obj, [])
-        if name not in holidays[dt_obj]:
-            holidays[dt_obj].append(name)
-
-    for month, day, name in [
-        (1, 1, "신정"),
-        (3, 1, "삼일절"),
-        (5, 5, "어린이날"),
-        (6, 6, "현충일"),
-        (8, 15, "광복절"),
-        (10, 3, "개천절"),
-        (10, 9, "한글날"),
-        (12, 25, "성탄절"),
-    ]:
-        add(datetime(year, month, day).date(), name)
-    return holidays
-
-
-def get_month_holidays(year: int, month: int):
-    holiday_map = {dt.day: names[:] for dt, names in get_korean_holidays(year).items() if dt.month == month}
-    for item in schedule:
-        dt = parse_schedule_datetime(item.get("datetime", ""))
-        if dt is None or dt.year != year or dt.month != month:
-            continue
-        if item.get("category") == "temp_holiday":
-            holiday_map.setdefault(dt.day, [])
-            label = item.get("text", "임시공휴일")
-            if label not in holiday_map[dt.day]:
-                holiday_map[dt.day].append(label)
-    return holiday_map
-
-
 def format_schedule_detail(item: dict, index: int | None = None) -> str:
     parts = []
     if index is not None:
@@ -1730,8 +1694,8 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
     date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25")
     time_input = discord.ui.TextInput(label="시간", placeholder="18:00")
     text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
-    category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False, default="개인")
-    repeat_input = discord.ui.TextInput(label="반복 설정", placeholder="없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말", required=False, default="없음")
+    category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False)
+    repeat_input = discord.ui.TextInput(label="반복 설정", placeholder="없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말", required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
