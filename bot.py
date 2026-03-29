@@ -43,7 +43,7 @@ YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower(
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
-FONT_FILE = os.path.join(BASE_DIR, "onglefont.ttf")
+FONT_FILE = os.path.join(BASE_DIR, "온글잎 박다현체.ttf")
 
 # =========================
 # 기본 설정
@@ -771,18 +771,39 @@ def load_music_data():
 # 공통 유틸
 # =========================
 def resolve_font_path():
-    if os.path.isfile(FONT_FILE):
-        return FONT_FILE
+    candidates = []
+    for base in [BASE_DIR, os.getcwd(), "/mnt/data", DATA_DIR]:
+        if not base:
+            continue
+        candidates.append(os.path.join(base, "온글잎 박다현체.ttf"))
+        try:
+            for name in os.listdir(base):
+                if not name.lower().endswith(".ttf"):
+                    continue
+                full = os.path.join(base, name)
+                normalized = unicodedata.normalize("NFC", name)
+                if normalized == "온글잎 박다현체.ttf" or "박다현" in normalized or "온글잎" in normalized:
+                    return full
+                candidates.append(full)
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
     return None
 
 
 def get_font(size: int):
-    try:
-        return ImageFont.truetype(FONT_FILE, size)
-    except Exception as e:
-        print(f"[폰트 오류] {e} | path={FONT_FILE}")
-        return ImageFont.load_default()
-
+    font_path = resolve_font_path()
+    if font_path:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except Exception as e:
+            print(f"[폰트 오류] {e} | path={font_path}")
+    else:
+        print("[폰트 오류] 온글잎 박다현체.ttf 파일을 찾지 못함")
+    return ImageFont.load_default()
 
 def safe_text(text: str, limit: int):
     return text if len(text) <= limit else text[:limit]
@@ -1047,28 +1068,71 @@ def create_calendar_image(year: int, month: int):
     sat_blue = (120, 146, 227)
     sun_red = (222, 128, 134)
     today_outline = (246, 102, 102)
-    today_fill = (250, 247, 248)
+    today_fill = (255, 248, 249)
+    today_text = (214, 92, 92)
     section_bg = (236, 234, 239)
 
-    title_font = get_font(44)
-    header_font = get_font(22)
+    title_font = get_font(46)
+    header_font = get_font(24)
     day_font = get_font(24)
-    schedule_font = get_font(17)
-    bottom_title_font = get_font(22)
-    bottom_text_font = get_font(17)
+    schedule_font = get_font(15)
+    today_schedule_font = get_font(19)
+    bottom_title_font = get_font(28)
+    bottom_text_font = get_font(21)
+    bottom_time_font = get_font(19)
+    bottom_empty_font = get_font(20)
 
-    card_x1, card_y1, card_x2, card_y2 = 55, 40, 1045, 1210
+    def fit_text(value: str, max_chars: int = 8):
+        value = (value or "").strip()
+        return value if len(value) <= max_chars else value[:max_chars - 1] + "…"
+
+    def wrap_text_lines(value: str, max_width: int, font, max_lines: int = 2):
+        words = (value or "").strip().split()
+        if not words:
+            return []
+
+        lines = []
+        current = words[0]
+
+        for word in words[1:]:
+            test = f"{current} {word}"
+            bbox = draw.textbbox((0, 0), test, font=font)
+            if bbox[2] - bbox[0] <= max_width:
+                current = test
+            else:
+                lines.append(current)
+                current = word
+                if len(lines) >= max_lines - 1:
+                    break
+
+        if len(lines) < max_lines:
+            lines.append(current)
+
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+
+        if len(lines) == max_lines:
+            bbox = draw.textbbox((0, 0), lines[-1], font=font)
+            while lines[-1] and (bbox[2] - bbox[0]) > max_width:
+                lines[-1] = lines[-1][:-1]
+                bbox = draw.textbbox((0, 0), lines[-1] + "…", font=font)
+            if lines[-1] != current or len(words) > len(" ".join(lines).split()):
+                lines[-1] = lines[-1].rstrip() + "…"
+
+        return lines
+
+    card_x1, card_y1, card_x2, card_y2 = 55, 40, 1045, 1215
     draw.rounded_rectangle((card_x1, card_y1, card_x2, card_y2), radius=28, fill=card_bg, outline=card_outline, width=3)
     draw.rounded_rectangle((card_x1 + 12, card_y1 + 12, card_x2 - 12, card_y2 - 12), radius=24, outline=(232, 228, 237), width=2)
 
     title = f"{year}년 {month:02d}월"
     bbox = draw.textbbox((0, 0), title, font=title_font)
     title_w = bbox[2] - bbox[0]
-    draw.text(((width - title_w) / 2, 78), title, fill=title_color, font=title_font)
+    draw.text(((width - title_w) / 2, 72), title, fill=title_color, font=title_font)
 
     days = ["월", "화", "수", "목", "금", "토", "일"]
     grid_left = 105
-    grid_top = 210
+    grid_top = 205
     cell_w = 124
     cell_h = 110
     gap_x = 10
@@ -1083,7 +1147,7 @@ def create_calendar_image(year: int, month: int):
 
         bbox = draw.textbbox((0, 0), day_name, font=header_font)
         tw = bbox[2] - bbox[0]
-        draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 156), day_name, fill=color, font=header_font)
+        draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 154), day_name, fill=color, font=header_font)
 
     cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(year, month)
@@ -1099,7 +1163,12 @@ def create_calendar_image(year: int, month: int):
             x2 = x1 + cell_w
             y2 = y1 + cell_h
 
-            draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=cell_bg, outline=cell_outline, width=2)
+            is_today = is_current_month and day_num == now.day and day_num != 0
+            fill_color = today_fill if is_today else cell_bg
+            outline_color = today_outline if is_today else cell_outline
+            outline_width = 4 if is_today else 2
+
+            draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=fill_color, outline=outline_color, width=outline_width)
 
             if day_num == 0:
                 continue
@@ -1109,26 +1178,28 @@ def create_calendar_image(year: int, month: int):
                 day_color = sat_blue
             elif col_idx == 6:
                 day_color = sun_red
-
-            if is_current_month and day_num == now.day:
-                draw.rounded_rectangle((x1, y1, x2, y2), radius=16, fill=today_fill, outline=today_outline, width=4)
+            if is_today:
+                day_color = today_text
 
             draw.text((x1 + 12, y1 + 8), str(day_num), fill=day_color, font=day_font)
 
             items = date_map.get(day_num, [])
-            preview_y = y1 + 44
+            preview_y = y1 + 42
 
             for idx, item in enumerate(items[:2]):
-                preview = safe_text(item["text"], 8)
-                draw.text((x1 + 10, preview_y + idx * 22), preview, fill=(85, 83, 92), font=schedule_font)
+                preview_font = today_schedule_font if is_today else schedule_font
+                preview_color = today_text if is_today else (85, 83, 92)
+                preview = fit_text(item["text"], 7 if is_today else 8)
+                draw.text((x1 + 10, preview_y + idx * (24 if is_today else 20)), preview, fill=preview_color, font=preview_font)
 
             if len(items) > 2:
                 more_text = f"+{len(items) - 2}"
-                draw.text((x1 + 10, preview_y + 44), more_text, fill=(120, 115, 130), font=schedule_font)
+                more_color = today_text if is_today else (120, 115, 130)
+                draw.text((x1 + 10, y1 + 86), more_text, fill=more_color, font=schedule_font)
 
-    section_x1, section_y1, section_x2, section_y2 = 95, 1040, 1005, 1170
-    draw.rounded_rectangle((section_x1, section_y1, section_x2, section_y2), radius=18, fill=section_bg, outline=cell_outline, width=2)
-    draw.text((section_x1 + 18, section_y1 + 14), "오늘 일정", fill=title_color, font=bottom_title_font)
+    section_x1, section_y1, section_x2, section_y2 = 92, 1035, 1008, 1178
+    draw.rounded_rectangle((section_x1, section_y1, section_x2, section_y2), radius=20, fill=section_bg, outline=cell_outline, width=2)
+    draw.text((section_x1 + 18, section_y1 + 12), "오늘 일정", fill=title_color, font=bottom_title_font)
 
     today_items = []
     for item in schedule:
@@ -1142,11 +1213,19 @@ def create_calendar_image(year: int, month: int):
             today_items.append(item)
 
     if today_items:
+        base_y = section_y1 + 54
         for idx, item in enumerate(today_items[:3]):
-            line = f"- {item['datetime'][11:16]} {item['text']}"
-            draw.text((section_x1 + 18, section_y1 + 52 + idx * 26), line, fill=text_main, font=bottom_text_font)
+            row_y = base_y + idx * 34
+            time_text = item["datetime"][11:16]
+            content_text = item["text"]
+
+            draw.text((section_x1 + 18, row_y), time_text, fill=today_text, font=bottom_time_font)
+
+            wrapped = wrap_text_lines(content_text, max_width=section_x2 - section_x1 - 120, font=bottom_text_font, max_lines=1)
+            line_text = wrapped[0] if wrapped else content_text
+            draw.text((section_x1 + 94, row_y - 1), line_text, fill=text_main, font=bottom_text_font)
     else:
-        draw.text((section_x1 + 18, section_y1 + 56), "오늘 일정 없음", fill=(135, 131, 142), font=bottom_text_font)
+        draw.text((section_x1 + 18, section_y1 + 60), "오늘 일정 없음", fill=(135, 131, 142), font=bottom_empty_font)
 
     output_file = os.path.join(BASE_DIR, f"calendar_{year}_{month}_{uuid.uuid4().hex[:8]}.png")
     image.save(output_file)
