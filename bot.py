@@ -3231,6 +3231,35 @@ async def slash_add_schedule(interaction: discord.Interaction, date: str, time_i
     )
 
 
+
+
+# =========================
+# 날짜 기반 일정 수정 (UX 개선)
+# =========================
+@bot.tree.command(name="일정수정_날짜", description="날짜로 일정 선택 후 수정")
+@app_commands.describe(date="날짜 입력 (예: 2026-03-25)")
+async def slash_edit_schedule_by_date(interaction: discord.Interaction, date: str):
+    try:
+        normalized_date = normalize_schedule_date(date)
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+
+    matched = []
+    for i, item in enumerate(schedule):
+        if item.get("datetime", "").startswith(normalized_date):
+            matched.append((i, item))
+
+    if not matched:
+        await interaction.response.send_message("❌ 해당 날짜에 일정이 없음", ephemeral=True)
+        return
+
+    msg = f"📅 {normalized_date} 일정 목록\n"
+    for idx2, (i, item) in enumerate(matched, start=1):
+        msg += f"{idx2}. {format_schedule_detail(item, i)}\n"
+
+    await interaction.response.send_message(msg + "\n👉 수정할 번호는 /일정수정 index로 입력", ephemeral=True)
+
 @bot.tree.command(name="일정수정", description="등록된 일정을 수정합니다")
 @app_commands.describe(index="수정할 일정 번호", date="새 날짜", time_input="새 시간", text="새 일정 내용", category="새 카테고리", repeat="새 반복설정")
 async def slash_edit_schedule(interaction: discord.Interaction, index: int, date: str | None = None, time_input: str | None = None, text: str | None = None, category: str | None = None, repeat: str | None = None):
