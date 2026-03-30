@@ -1,5 +1,6 @@
 # version: 2026-03-28-cookieless-workaround
 import discord
+from discord import app_commands
 from discord.ext import commands
 import json
 import os
@@ -11,6 +12,7 @@ import wavelink
 import calendar
 import uuid
 import unicodedata
+import re
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
@@ -62,7 +64,18 @@ intents.message_content = True
 intents.voice_states = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+class SlashBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
+
+    async def setup_hook(self):
+        try:
+            synced_global = await self.tree.sync()
+            print(f"[setup_hook] 글로벌 슬래시 동기화 완료: {len(synced_global)}개", flush=True)
+        except Exception as e:
+            print(f"[setup_hook] 글로벌 슬래시 동기화 실패: {e}", flush=True)
+
+bot = SlashBot()
 
 
 def make_queue_item(channel_id: int | None, query: str):
@@ -236,6 +249,7 @@ schedule = []
 user_colors = {}
 sent_alerts = set()
 schedule_task_started = False
+slash_sync_done = False
 
 music_queues = {}
 music_states = {}
@@ -460,23 +474,69 @@ def get_month_holidays(year: int, month: int):
 
 
 def normalize_schedule_date(date_text: str) -> str:
-    cleaned = str(date_text).strip().replace(".", "-").replace("/", "-")
-    parts = [part for part in cleaned.split("-") if part]
-    if len(parts) != 3:
-        raise ValueError("날짜 형식은 YYYY-MM-DD 로 입력해줘")
-    year, month, day = map(int, parts)
-    return f"{year:04d}-{month:02d}-{day:02d}"
+    raw = str(date_text or "").strip()
+    if not raw:
+        raise ValueError("날짜를 입력해줘")
+
+    compact = re.sub(r"\s+", "", raw)
+    compact = compact.replace(".", "-").replace("/", "-")
+    compact = compact.replace("년", "-").replace("월", "-").replace("일", "")
+    compact = re.sub(r"-+", "-", compact).strip("-")
+
+    if re.fullmatch(r"\d{8}", compact):
+        year = int(compact[:4])
+        month = int(compact[4:6])
+        day = int(compact[6:8])
+    else:
+        parts = [part for part in compact.split("-") if part]
+        if len(parts) != 3:
+            raise ValueError("날짜는 2026-03-25 또는 20260325처럼 입력해줘")
+        year, month, day = map(int, parts)
+
+    try:
+        normalized = datetime(year, month, day)
+    except ValueError:
+        raise ValueError("날짜를 다시 확인해줘")
+    return normalized.strftime("%Y-%m-%d")
 
 
 def normalize_schedule_time(time_text: str) -> str:
-    cleaned = str(time_text).strip().replace(".", ":")
-    parts = [part for part in cleaned.split(":") if part]
-    if len(parts) != 2:
-        raise ValueError("시간 형식은 HH:MM 으로 입력해줘")
-    hour, minute = map(int, parts)
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError("시간 범위를 다시 확인해줘")
+    raw = str(time_text or "").strip()
+    if not raw:
+        raise ValueError("시간을 입력해줘")
+
+    compact = re.sub(r"\s+", "", raw)
+    compact = compact.replace(".", ":")
+
+    hour = None
+    minute = None
+
+    m = re.fullmatch(r"(\d{1,2})시(?:(\d{1,2})분?)?", compact)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+    elif re.fullmatch(r"\d{3,4}", compact):
+        if len(compact) == 3:
+            hour = int(compact[0])
+            minute = int(compact[1:])
+        else:
+            hour = int(compact[:2])
+            minute = int(compact[2:])
+    else:
+        normalized = compact.replace("시", ":").replace("분", "")
+        parts = [part for part in normalized.split(":") if part]
+        if len(parts) == 1 and parts[0].isdigit():
+            hour = int(parts[0])
+            minute = 0
+        elif len(parts) == 2:
+            hour, minute = map(int, parts)
+        else:
+            raise ValueError("시간은 18:00, 1800, 18시, 18시30분처럼 입력해줘")
+
+    if hour is None or minute is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("시간을 다시 확인해줘")
     return f"{hour:02d}:{minute:02d}"
+
 
 
 def parse_schedule_datetime(dt_str: str):
@@ -504,8 +564,45 @@ def normalize_schedule_category(value: str) -> str:
     return mapping.get(raw, "personal")
 
 
+
+def normalize_repeat_input(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip())
+
+
+def needs_weekday_selection(value: str) -> bool:
+    normalized = normalize_repeat_input(value).lower()
+    return normalized in {"요일반복", "주간반복", "weekly"}
+
+
+
+def build_schedule_item_from_values(normalized_date: str, normalized_time: str, text_value: str, user, channel_id: int, category_value: str, repeat_type: str = "none", repeat_days=None):
+    if repeat_days is None:
+        repeat_days = []
+    user_id = str(user.id)
+    user_name = user.display_name
+    color = user_colors.get(user_id, DEFAULT_COLOR)
+    category = normalize_schedule_category(category_value)
+    item = {
+        "datetime": f"{normalized_date} {normalized_time}",
+        "text": text_value.strip(),
+        "name": user_name,
+        "user_id": user.id,
+        "color": color,
+        "category": category,
+        "repeat_type": repeat_type,
+        "repeat_days": repeat_days,
+        "alert_enabled": False,
+        "alert_10min": False,
+        "channel_id": channel_id,
+    }
+    schedule.append(item)
+    save_schedule()
+    return item
+
+PENDING_WEEKDAY_SCHEDULES = {}
+
 def parse_repeat_rule(value: str):
-    raw = str(value or "").strip().replace(" ", "")
+    raw = normalize_repeat_input(value)
     if not raw or raw.lower() in {"없음", "안함", "none"}:
         return "none", []
     lowered = raw.lower()
@@ -1375,7 +1472,7 @@ async def play_next(guild_id: int):
     if player is None:
         state["current"] = None
         save_music_data()
-        await send_music_message(guild_id, "❌ 음성 채널 연결이 끊어졌어. 다시 !입장 후 !재생 해줘")
+        await send_music_message(guild_id, "❌ 음성 채널 연결이 끊어졌어. 다시 /입장 후 /재생 해줘")
         return
 
     try:
@@ -1458,7 +1555,7 @@ def create_calendar_image(year: int, month: int):
     title_w = bbox[2] - bbox[0]
     draw.text(((width - title_w) / 2, 78), title, fill=title_color, font=title_font)
 
-    days = ["월", "화", "수", "목", "금", "토", "일"]
+    days = ["일", "월", "화", "수", "목", "금", "토"]
     grid_left = 105
     grid_top = 210
     cell_w = 124
@@ -1477,7 +1574,7 @@ def create_calendar_image(year: int, month: int):
         tw = bbox[2] - bbox[0]
         draw.text((grid_left + i * (cell_w + gap_x) + (cell_w - tw) / 2, 160), day_name, fill=color, font=header_font)
 
-    cal = calendar.Calendar(firstweekday=0)
+    cal = calendar.Calendar(firstweekday=6)
     month_days = cal.monthdayscalendar(year, month)
     date_map = get_month_schedule_map(year, month)
     holiday_map = get_month_holidays(year, month)
@@ -1570,14 +1667,14 @@ class HelpView(discord.ui.View):
     async def music_help(self, interaction: discord.Interaction, button: discord.ui.Button):
         text = (
             "🎵 노래 명령어\n\n"
-            "!입장\n"
-            "!퇴장\n"
-            "!재생 노래이름\n!재생 유튜브플레이리스트URL\n"
-            "!정지\n"
-            "!일시정지\n"
-            "!다시재생\n"
-            "!가사 가수 - 제목\n"
-            "!노래리스트"
+            "/입장\n"
+            "/퇴장\n"
+            "/재생 노래이름\n/재생 유튜브플레이리스트URL\n"
+            "/정지\n"
+            "/일시정지\n"
+            "/다시재생\n"
+            "/가사 가수 - 제목\n"
+            "/노래리스트"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -1585,11 +1682,11 @@ class HelpView(discord.ui.View):
     async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
         text = (
             "📅 일정 명령어\n\n"
-            "!캘린더\n"
-            "!캘린더 2026 03\n"
-            "!일정추가 날짜 시간 내용\n"
-            "!일정삭제 번호\n"
-            "!일정목록\n\n일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말"
+            "/캘린더\n"
+            "/캘린더 2026 03\n"
+            "/일정추가 날짜 시간 내용\n"
+            "/일정삭제 번호\n"
+            "/일정목록\n\n일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -1601,11 +1698,11 @@ class HelpButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         text = (
             "📅 일정 명령어\n\n"
-            "!캘린더\n"
-            "!캘린더 2026 03\n"
-            "!일정추가 날짜 시간 내용\n"
-            "!일정삭제 번호\n"
-            "!일정목록\n\n"
+            "/캘린더\n"
+            "/캘린더 2026 03\n"
+            "/일정추가 날짜 시간 내용\n"
+            "/일정삭제 번호\n"
+            "/일정목록\n\n"
             "일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n"
             "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말"
         )
@@ -1619,11 +1716,11 @@ class ScheduleHelpButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         text = (
             "📅 일정 명령어\n\n"
-            "!캘린더\n"
-            "!캘린더 2026 03\n"
-            "!일정추가 날짜 시간 내용\n"
-            "!일정삭제 번호\n"
-            "!일정목록\n\n일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말"
+            "/캘린더\n"
+            "/캘린더 2026 03\n"
+            "/일정추가 날짜 시간 내용\n"
+            "/일정삭제 번호\n"
+            "/일정목록\n\n일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -1691,11 +1788,11 @@ class ColorButton(discord.ui.Button):
 # 모달 UI
 # =========================
 class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
-    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25")
-    time_input = discord.ui.TextInput(label="시간", placeholder="18:00")
+    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25 또는 20260325")
+    time_input = discord.ui.TextInput(label="시간", placeholder="18:00 또는 18시")
     text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
     category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False)
-    repeat_input = discord.ui.TextInput(label="반복 설정", placeholder="없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말", required=False)
+    repeat_input = discord.ui.TextInput(label="반복 설정", placeholder="없음 / 매일 / 매월 / 매년 / 요일반복", required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -1705,34 +1802,184 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
             await interaction.response.send_message(f"❌ {e}", ephemeral=True)
             return
 
+        if needs_weekday_selection(self.repeat_input.value):
+            token = str(uuid.uuid4())
+            PENDING_WEEKDAY_SCHEDULES[token] = {
+                "date": normalized_date,
+                "time": normalized_time,
+                "text": self.text.value.strip(),
+                "category": self.category_input.value,
+                "user_id": interaction.user.id,
+                "channel_id": interaction.channel_id,
+                "selected_days": set(),
+            }
+            view = WeekdayRepeatSelectView(token)
+            await interaction.response.send_message(
+                "반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼.",
+                view=view,
+                ephemeral=True
+            )
+            return
+
         repeat_type, repeat_days = parse_repeat_rule(self.repeat_input.value)
-        user_id = str(interaction.user.id)
-        user_name = interaction.user.display_name
-        color = user_colors.get(user_id, DEFAULT_COLOR)
-        category = normalize_schedule_category(self.category_input.value)
+        item = build_schedule_item_from_values(
+            normalized_date,
+            normalized_time,
+            self.text.value,
+            interaction.user,
+            interaction.channel_id,
+            self.category_input.value,
+            repeat_type,
+            repeat_days
+        )
 
-        schedule.append({
-            "datetime": f"{normalized_date} {normalized_time}",
-            "text": self.text.value.strip(),
-            "name": user_name,
-            "user_id": interaction.user.id,
-            "color": color,
-            "category": category,
-            "repeat_type": repeat_type,
-            "repeat_days": repeat_days,
-            "alert_enabled": False,
-            "alert_10min": False,
-            "channel_id": interaction.channel_id
-        })
-        save_schedule()
-
-        category_label = SCHEDULE_CATEGORY_LABELS.get(category, "개인일정")
-        repeat_label = repeat_rule_to_text(schedule[-1])
+        category_label = SCHEDULE_CATEGORY_LABELS.get(item.get("category", "personal"), "개인일정")
+        repeat_label = repeat_rule_to_text(item)
         await interaction.response.send_message(
-            f"✅ 일정 등록 완료\n종류: {category_label}\n반복: {repeat_label}\n새로 !캘린더 입력하면 반영돼",
+            f"✅ 일정 등록 완료\n종류: {category_label}\n반복: {repeat_label}\n새로 /캘린더 입력하면 반영돼",
             ephemeral=True
         )
 
+
+class WeekdayScheduleModal(discord.ui.Modal, title="요일 선택 일정 등록"):
+    date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25 또는 20260325")
+    time_input = discord.ui.TextInput(label="시간", placeholder="18:00 또는 18시")
+    text = discord.ui.TextInput(label="일정 내용", placeholder="약속")
+    category_input = discord.ui.TextInput(label="일정 종류", placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            normalized_date = normalize_schedule_date(self.date.value)
+            normalized_time = normalize_schedule_time(self.time_input.value)
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+
+        token = str(uuid.uuid4())
+        PENDING_WEEKDAY_SCHEDULES[token] = {
+            "date": normalized_date,
+            "time": normalized_time,
+            "text": self.text.value.strip(),
+            "category": self.category_input.value,
+            "user_id": interaction.user.id,
+            "channel_id": interaction.channel_id,
+            "selected_days": set(),
+        }
+        view = WeekdayRepeatSelectView(token)
+        await interaction.response.send_message(
+            "반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼.",
+            view=view,
+            ephemeral=True
+        )
+
+class WeekdayToggleButton(discord.ui.Button):
+    def __init__(self, token: str, label: str, weekday_index: int, row: int):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=row)
+        self.token = token
+        self.weekday_index = weekday_index
+
+    async def callback(self, interaction: discord.Interaction):
+        pending = PENDING_WEEKDAY_SCHEDULES.get(self.token)
+        if not pending:
+            await interaction.response.send_message("등록 정보가 만료됐어. 다시 시도해줘.", ephemeral=True)
+            return
+        selected = pending["selected_days"]
+        if self.weekday_index in selected:
+            selected.remove(self.weekday_index)
+        else:
+            selected.add(self.weekday_index)
+        for child in self.view.children:
+            if isinstance(child, WeekdayToggleButton):
+                child.style = discord.ButtonStyle.success if child.weekday_index in selected else discord.ButtonStyle.secondary
+        selected_names = [WEEKDAY_KR[idx] for idx in sorted(selected)]
+        content = "반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼."
+        if selected_names:
+            content += f"\n현재 선택: {', '.join(selected_names)}"
+        await interaction.response.edit_message(content=content, view=self.view)
+
+class WeekdayQuickSetButton(discord.ui.Button):
+    def __init__(self, token: str, label: str, preset: list[int], row: int):
+        super().__init__(label=label, style=discord.ButtonStyle.primary, row=row)
+        self.token = token
+        self.preset = preset
+
+    async def callback(self, interaction: discord.Interaction):
+        pending = PENDING_WEEKDAY_SCHEDULES.get(self.token)
+        if not pending:
+            await interaction.response.send_message("등록 정보가 만료됐어. 다시 시도해줘.", ephemeral=True)
+            return
+        pending["selected_days"] = set(self.preset)
+        for child in self.view.children:
+            if isinstance(child, WeekdayToggleButton):
+                child.style = discord.ButtonStyle.success if child.weekday_index in pending["selected_days"] else discord.ButtonStyle.secondary
+        selected_names = [WEEKDAY_KR[idx] for idx in sorted(pending["selected_days"])]
+        await interaction.response.edit_message(
+            content="반복할 요일을 눌러서 선택해줘.\n선택 후 `완료`를 누르면 저장돼.\n현재 선택: " + ", ".join(selected_names),
+            view=self.view
+        )
+
+class WeekdayRepeatSaveButton(discord.ui.Button):
+    def __init__(self, token: str):
+        super().__init__(label="완료", style=discord.ButtonStyle.success, row=2)
+        self.token = token
+
+    async def callback(self, interaction: discord.Interaction):
+        pending = PENDING_WEEKDAY_SCHEDULES.get(self.token)
+        if not pending:
+            await interaction.response.send_message("등록 정보가 만료됐어. 다시 시도해줘.", ephemeral=True)
+            return
+        repeat_days = sorted(pending["selected_days"])
+        if not repeat_days:
+            await interaction.response.send_message("최소 1개 요일을 선택해줘.", ephemeral=True)
+            return
+        item = build_schedule_item_from_values(
+            pending["date"],
+            pending["time"],
+            pending["text"],
+            interaction.user,
+            pending["channel_id"],
+            pending["category"],
+            "weekly",
+            repeat_days
+        )
+        PENDING_WEEKDAY_SCHEDULES.pop(self.token, None)
+        await interaction.response.edit_message(
+            content=f"✅ 일정 등록 완료\n종류: {get_schedule_category_label(item)}\n반복: {repeat_rule_to_text(item)}\n새로 /캘린더 입력하면 반영돼",
+            view=None
+        )
+
+class WeekdayRepeatCancelButton(discord.ui.Button):
+    def __init__(self, token: str):
+        super().__init__(label="취소", style=discord.ButtonStyle.danger, row=2)
+        self.token = token
+
+    async def callback(self, interaction: discord.Interaction):
+        PENDING_WEEKDAY_SCHEDULES.pop(self.token, None)
+        await interaction.response.edit_message(content="요일 선택 등록을 취소했어.", view=None)
+
+class WeekdayRepeatSelectView(discord.ui.View):
+    def __init__(self, token: str):
+        super().__init__(timeout=300)
+        self.token = token
+        labels = [("일", 6), ("월", 0), ("화", 1), ("수", 2), ("목", 3), ("금", 4), ("토", 5)]
+        for idx, (label, weekday_index) in enumerate(labels):
+            self.add_item(WeekdayToggleButton(token, label, weekday_index, row=0 if idx < 4 else 1))
+        self.add_item(WeekdayQuickSetButton(token, "평일", [0,1,2,3,4], row=1))
+        self.add_item(WeekdayQuickSetButton(token, "주말", [5,6], row=1))
+        self.add_item(WeekdayRepeatSaveButton(token))
+        self.add_item(WeekdayRepeatCancelButton(token))
+
+class AddScheduleChoiceView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="일반 등록", style=discord.ButtonStyle.success)
+    async def normal_add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddScheduleModal())
+
+    @discord.ui.button(label="요일 선택 등록", style=discord.ButtonStyle.primary)
+    async def weekday_add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(WeekdayScheduleModal())
 
 class AddSongModal(discord.ui.Modal, title="노래 추가"):
     song = discord.ui.TextInput(label="노래 제목 또는 URL", placeholder="예: 아이유 밤편지 / 유튜브 링크")
@@ -2075,7 +2322,7 @@ class CalendarView(discord.ui.View):
 
     @discord.ui.button(label="일정등록", style=discord.ButtonStyle.success, row=1)
     async def add_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddScheduleModal())
+        await interaction.response.send_message("등록 방법을 골라줘", view=AddScheduleChoiceView(), ephemeral=True)
 
     @discord.ui.button(label="일정삭제", style=discord.ButtonStyle.danger, row=1)
     async def delete_schedule_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2239,7 +2486,7 @@ class MusicView(discord.ui.View):
 
         if not artist:
             await interaction.response.send_message(
-                f"현재곡 제목이 `{song}` 형태라서 자동 가사 검색이 어려워.\n`!가사 가수 - 제목` 형식으로 입력해줘.",
+                f"현재곡 제목이 `{song}` 형태라서 자동 가사 검색이 어려워.\n`/가사 가수 - 제목` 형식으로 입력해줘.",
                 ephemeral=True
             )
             return
@@ -2263,14 +2510,14 @@ class MusicView(discord.ui.View):
     async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         text = (
             "🎵 노래 명령어\n\n"
-            "!입장\n"
-            "!퇴장\n"
-            "!재생 노래이름\n!재생 유튜브플레이리스트URL\n"
-            "!정지\n"
-            "!일시정지\n"
-            "!다시재생\n"
-            "!노래리스트\n!플레이리스트정보 URL\n"
-            "!가사 가수 - 제목"
+            "/입장\n"
+            "/퇴장\n"
+            "/재생 노래이름\n/재생 유튜브플레이리스트URL\n"
+            "/정지\n"
+            "/일시정지\n"
+            "/다시재생\n"
+            "/노래리스트\n/플레이리스트정보 URL\n"
+            "/가사 가수 - 제목"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -2294,8 +2541,28 @@ class MusicView(discord.ui.View):
 # =========================
 @bot.event
 async def on_ready():
-    global schedule_task_started
-    print(f"로그인 완료: {bot.user}")
+    global schedule_task_started, slash_sync_done
+    print(f"로그인 완료: {bot.user}", flush=True)
+
+    if not slash_sync_done:
+        try:
+            synced_global = await bot.tree.sync()
+            print(f"슬래시 명령어 글로벌 동기화 완료: {len(synced_global)}개", flush=True)
+
+            guild_sync_count = 0
+            for guild in bot.guilds:
+                try:
+                    bot.tree.copy_global_to(guild=guild)
+                    synced_guild = await bot.tree.sync(guild=guild)
+                    guild_sync_count += len(synced_guild)
+                    print(f"길드 슬래시 동기화 완료: {guild.name} ({guild.id}) / {len(synced_guild)}개", flush=True)
+                except Exception as guild_error:
+                    print(f"길드 슬래시 동기화 실패: {guild.name} ({guild.id}) / {guild_error}", flush=True)
+
+            slash_sync_done = True
+            print(f"슬래시 명령어 동기화 완료: 글로벌 {len(synced_global)}개, 길드 누적 {guild_sync_count}개", flush=True)
+        except Exception as e:
+            print(f"슬래시 명령어 동기화 실패: {e}", flush=True)
 
     try:
         load_schedule()
@@ -2701,13 +2968,13 @@ async def lyrics(ctx, *, song: str = None):
             song = current["title"]
 
     if song is None:
-        await ctx.send("노래 제목 입력해줘. 예시: `!가사 아이유 - 밤편지`")
+        await ctx.send("노래 제목 입력해줘. 예시: `/가사 아이유 - 밤편지`")
         return
 
     artist, title = extract_artist_title(song)
 
     if not artist:
-        await ctx.send("가사는 `가수 - 제목` 형식이 가장 잘 돼. 예: `!가사 아이유 - 밤편지`")
+        await ctx.send("가사는 `가수 - 제목` 형식이 가장 잘 돼. 예: `/가사 아이유 - 밤편지`")
         return
 
     async with aiohttp.ClientSession() as session:
@@ -2825,6 +3092,117 @@ async def list_schedule(ctx):
     await send_schedule_list_message(ctx)
 
 
+class SlashContextAdapter:
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.guild = interaction.guild
+        self.channel = interaction.channel
+        self.voice_client = interaction.guild.voice_client if interaction.guild else None
+
+    async def send(self, content=None, **kwargs):
+        if not self.interaction.response.is_done():
+            await self.interaction.response.send_message(content, **kwargs)
+        else:
+            await self.interaction.followup.send(content, **kwargs)
+
+
+@bot.tree.command(name="입장", description="현재 들어가 있는 음성 채널에 입장합니다")
+async def slash_join(interaction: discord.Interaction):
+    await join(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="퇴장", description="음성 채널에서 퇴장합니다")
+async def slash_leave(interaction: discord.Interaction):
+    await leave(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="재생", description="노래 제목이나 유튜브 링크를 재생합니다")
+@app_commands.describe(query="노래 제목 또는 유튜브 링크")
+async def slash_play(interaction: discord.Interaction, query: str | None = None):
+    await play(SlashContextAdapter(interaction), query=query)
+
+
+@bot.tree.command(name="정지", description="현재 재생 중인 노래를 정지합니다")
+async def slash_stop(interaction: discord.Interaction):
+    await stop(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="일시정지", description="현재 재생 중인 노래를 일시정지합니다")
+async def slash_pause(interaction: discord.Interaction):
+    await pause(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="다시재생", description="일시정지한 노래를 다시 재생합니다")
+async def slash_resume(interaction: discord.Interaction):
+    await resume(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="노래리스트", description="현재 대기열을 보여줍니다")
+async def slash_queue_list(interaction: discord.Interaction):
+    await queue_list(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="플레이리스트정보", description="유튜브 플레이리스트 정보를 보여줍니다")
+@app_commands.describe(query="유튜브 플레이리스트 URL")
+async def slash_playlist_info(interaction: discord.Interaction, query: str):
+    await playlist_info(SlashContextAdapter(interaction), query=query)
+
+
+@bot.tree.command(name="가사", description="노래 가사를 보여줍니다")
+@app_commands.describe(song="가수 - 제목 형식 권장")
+async def slash_lyrics(interaction: discord.Interaction, song: str | None = None):
+    await lyrics(SlashContextAdapter(interaction), song=song)
+
+
+@bot.tree.command(name="도움말", description="노래와 일정 명령어 도움말을 보여줍니다")
+async def slash_help(interaction: discord.Interaction):
+    await help_command(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="쿠키상태", description="yt-dlp 쿠키 적용 상태를 보여줍니다")
+async def slash_cookie_status(interaction: discord.Interaction):
+    await cookie_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="우회상태", description="유튜브 우회 재생 상태를 보여줍니다")
+async def slash_bypass_status(interaction: discord.Interaction):
+    await bypass_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="음악상태", description="현재 음악 상태를 보여줍니다")
+async def slash_music_status(interaction: discord.Interaction):
+    await music_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="일정추가", description="간단한 일정 하나를 바로 추가합니다")
+@app_commands.describe(date="예: 2026-03-25", time_input="예: 18:00", text="일정 내용")
+async def slash_add_schedule(interaction: discord.Interaction, date: str, time_input: str, text: str):
+    await add_schedule_cmd(SlashContextAdapter(interaction), date, time_input, text=text)
+
+
+@bot.tree.command(name="일정삭제", description="등록된 일정을 삭제합니다")
+@app_commands.describe(index="삭제할 일정 번호")
+async def slash_delete_schedule(interaction: discord.Interaction, index: int):
+    await delete_schedule_cmd(SlashContextAdapter(interaction), index=index)
+
+
+@bot.tree.command(name="캘린더", description="캘린더를 표시합니다")
+@app_commands.describe(year="연도", month="월")
+async def slash_calendar(interaction: discord.Interaction, year: int | None = None, month: int | None = None):
+    await show_calendar(SlashContextAdapter(interaction), year=year, month=month)
+
+
+@bot.tree.command(name="일정목록", description="등록된 일정 목록을 보여줍니다")
+async def slash_schedule_list(interaction: discord.Interaction):
+    await list_schedule(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="재시동", description="봇을 재시동합니다")
+async def slash_restart(interaction: discord.Interaction):
+    await restart(SlashContextAdapter(interaction))
+
+
 # =========================
 # 실행
 # =========================
@@ -2832,6 +3210,7 @@ async def list_schedule(ctx):
 async def restart_error(ctx, error):
     if isinstance(error, commands.NotOwner):
         await ctx.send("❌ 이 명령어는 봇 관리자만 사용할 수 있어.")
+
 
 # =========================
 # 슬래시 컨텍스트 / 슬래시 명령어
@@ -2849,45 +3228,19 @@ class InteractionCtx:
             return await self.interaction.response.send_message(content=content, **kwargs)
         return await self.interaction.followup.send(content=content, **kwargs)
 
-
-@bot.event
-async def on_ready():
-    global schedule_task_started, slash_sync_done
-    print(f"로그인 완료: {bot.user}", flush=True)
-
-    if not slash_sync_done:
-        try:
-            synced_global = await bot.tree.sync()
-            print(f"슬래시 명령어 글로벌 동기화 완료: {len(synced_global)}개", flush=True)
-            slash_sync_done = True
-        except Exception as e:
-            print(f"슬래시 명령어 동기화 실패: {e}", flush=True)
-
-    try:
-        await ensure_lavalink_ready()
-    except Exception as e:
-        print(f"로컬 오류: {e}", flush=True)
-
-    if not schedule_task_started:
-        bot.loop.create_task(check_schedule())
-        schedule_task_started = True
-
-    load_schedule()
-    load_colors()
-    load_music_data()
-
+def _schedule_sort_key(item):
+    dt = parse_schedule_datetime(item.get("datetime", "")) or datetime.max
+    return (dt, item.get("text", ""))
 
 @bot.tree.command(name="입장", description="현재 들어가 있는 음성 채널에 입장합니다")
 async def slash_join(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await join(InteractionCtx(interaction))
 
-
 @bot.tree.command(name="퇴장", description="음성 채널에서 퇴장합니다")
 async def slash_leave(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await leave(InteractionCtx(interaction))
-
 
 @bot.tree.command(name="재생", description="노래 제목이나 유튜브 링크를 재생합니다")
 @app_commands.describe(query="노래 제목 또는 유튜브 링크")
@@ -2895,30 +3248,25 @@ async def slash_play(interaction: discord.Interaction, query: str):
     await interaction.response.defer(thinking=False)
     await play(InteractionCtx(interaction), query=query)
 
-
 @bot.tree.command(name="정지", description="현재 재생을 정지합니다")
 async def slash_stop(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await stop(InteractionCtx(interaction))
-
 
 @bot.tree.command(name="일시정지", description="현재 재생을 일시정지합니다")
 async def slash_pause(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await pause(InteractionCtx(interaction))
 
-
 @bot.tree.command(name="다시재생", description="일시정지된 곡을 다시 재생합니다")
 async def slash_resume(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await resume(InteractionCtx(interaction))
 
-
 @bot.tree.command(name="노래리스트", description="현재 대기열을 보여줍니다")
 async def slash_queue_list(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await queue_list(InteractionCtx(interaction))
-
 
 @bot.tree.command(name="플레이리스트정보", description="유튜브 플레이리스트 곡 목록을 보여줍니다")
 @app_commands.describe(query="유튜브 플레이리스트 URL")
@@ -2926,37 +3274,31 @@ async def slash_playlist_info(interaction: discord.Interaction, query: str):
     await interaction.response.defer(thinking=False)
     await playlist_info(InteractionCtx(interaction), query=query)
 
-
 @bot.tree.command(name="가사", description="노래 가사를 찾아 보여줍니다")
 @app_commands.describe(song="가수 - 제목 또는 노래 제목")
 async def slash_lyrics(interaction: discord.Interaction, song: str):
     await interaction.response.defer(thinking=False)
     await lyrics(InteractionCtx(interaction), song=song)
 
-
 @bot.tree.command(name="도움말", description="명령어 도움말을 보여줍니다")
 async def slash_help(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await help_command(InteractionCtx(interaction))
-
 
 @bot.tree.command(name="쿠키상태", description="쿠키 적용 상태를 확인합니다")
 async def slash_cookie_status(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await cookie_status(InteractionCtx(interaction))
 
-
 @bot.tree.command(name="우회상태", description="우회 설정 상태를 확인합니다")
 async def slash_bypass_status(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await bypass_status(InteractionCtx(interaction))
 
-
 @bot.tree.command(name="음악상태", description="현재 음악 상태를 확인합니다")
 async def slash_music_status(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await music_status(InteractionCtx(interaction))
-
 
 @bot.tree.command(name="캘린더", description="캘린더를 표시합니다")
 @app_commands.describe(year="연도", month="월")
@@ -2964,12 +3306,10 @@ async def slash_show_calendar(interaction: discord.Interaction, year: int | None
     await interaction.response.defer(thinking=False)
     await show_calendar(InteractionCtx(interaction), year=year, month=month)
 
-
 @bot.tree.command(name="일정목록", description="등록된 일정 목록을 보여줍니다")
 async def slash_list_schedule(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
     await list_schedule(InteractionCtx(interaction))
-
 
 @bot.tree.command(name="일정추가", description="일정을 등록합니다")
 @app_commands.describe(
@@ -2977,7 +3317,25 @@ async def slash_list_schedule(interaction: discord.Interaction):
     time_input="시간 예: 18:00 또는 18시",
     text="일정 내용",
     category="개인/생일/이벤트/업데이트/임시공휴일",
-    repeat="없음/매일/매월/매년/평일/주말/월,수,금"
+    repeat="없음/매일/매월/매년/요일반복/평일/주말 또는 월,수,금"
+)
+@app_commands.choices(
+    category=[
+        app_commands.Choice(name="개인일정", value="개인"),
+        app_commands.Choice(name="생일일정", value="생일"),
+        app_commands.Choice(name="이벤트일정", value="이벤트"),
+        app_commands.Choice(name="업데이트일정", value="업데이트"),
+        app_commands.Choice(name="임시공휴일", value="임시공휴일"),
+    ],
+    repeat=[
+        app_commands.Choice(name="없음", value="없음"),
+        app_commands.Choice(name="매일", value="매일"),
+        app_commands.Choice(name="매월", value="매월"),
+        app_commands.Choice(name="매년", value="매년"),
+        app_commands.Choice(name="요일반복(선택창 열기)", value="요일반복"),
+        app_commands.Choice(name="평일", value="평일"),
+        app_commands.Choice(name="주말", value="주말"),
+    ],
 )
 async def slash_add_schedule(interaction: discord.Interaction, date: str, time_input: str, text: str, category: str = "개인", repeat: str = "없음"):
     try:
@@ -2988,7 +3346,14 @@ async def slash_add_schedule(interaction: discord.Interaction, date: str, time_i
         return
 
     if needs_weekday_selection(repeat):
-        await interaction.response.send_message("❌ 요일반복은 `월,화,수`처럼 입력해줘", ephemeral=True)
+        PENDING_WEEKDAY_SCHEDULES[interaction.user.id] = {
+            "date": normalized_date,
+            "time": normalized_time,
+            "text": text,
+            "category": category,
+            "channel_id": interaction.channel_id,
+        }
+        await interaction.response.send_message("요일을 골라줘", view=WeekdayRepeatPickerView(interaction.user.id), ephemeral=True)
         return
 
     repeat_type, repeat_days = parse_repeat_rule(repeat)
@@ -2999,7 +3364,6 @@ async def slash_add_schedule(interaction: discord.Interaction, date: str, time_i
         f"✅ 일정 등록 완료\n종류: {get_schedule_category_label(item)}\n반복: {repeat_rule_to_text(item)}\n새로: /캘린더 입력하면 반영돼",
         ephemeral=True
     )
-
 
 @bot.tree.command(name="일정수정", description="등록된 일정을 수정합니다")
 @app_commands.describe(index="수정할 일정 번호", date="새 날짜", time_input="새 시간", text="새 일정 내용", category="새 카테고리", repeat="새 반복설정")
@@ -3021,15 +3385,23 @@ async def slash_edit_schedule(interaction: discord.Interaction, index: int, date
         await interaction.response.send_message(f"❌ {e}", ephemeral=True)
         return
 
-    item["datetime"] = f"{new_date} {new_time}"
     if text:
         item["text"] = text.strip()
+    item["datetime"] = f"{new_date} {new_time}"
     if category:
         item["category"] = normalize_schedule_category(category)
-
     if repeat is not None:
         if needs_weekday_selection(repeat):
-            await interaction.response.send_message("❌ 요일반복은 `월,화,수`처럼 입력해줘", ephemeral=True)
+            PENDING_WEEKDAY_SCHEDULES[interaction.user.id] = {
+                "edit_index": index - 1,
+                "date": new_date,
+                "time": new_time,
+                "text": item["text"],
+                "category": item.get("category", "personal"),
+                "channel_id": interaction.channel_id,
+            }
+            save_schedule()
+            await interaction.response.send_message("수정할 반복 요일을 골라줘", view=WeekdayRepeatPickerView(interaction.user.id), ephemeral=True)
             return
         repeat_type, repeat_days = parse_repeat_rule(repeat)
         item["repeat_type"] = repeat_type
@@ -3041,13 +3413,11 @@ async def slash_edit_schedule(interaction: discord.Interaction, index: int, date
         ephemeral=True
     )
 
-
 @bot.tree.command(name="일정삭제", description="등록된 일정을 삭제합니다")
 @app_commands.describe(index="삭제할 일정 번호")
 async def slash_delete_schedule(interaction: discord.Interaction, index: int):
     await interaction.response.defer(thinking=False)
     await delete_schedule_cmd(InteractionCtx(interaction), index=index)
-
 
 @bot.tree.command(name="재시동", description="봇을 재시동합니다")
 async def slash_restart(interaction: discord.Interaction):
