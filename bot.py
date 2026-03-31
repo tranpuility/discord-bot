@@ -2541,109 +2541,13 @@ class MusicView(discord.ui.View):
 # =========================
 @bot.event
 async def on_ready():
-    global schedule_task_started, slash_sync_done
+    global slash_sync_done
+
     print(f"로그인 완료: {bot.user}", flush=True)
 
     if not slash_sync_done:
-        try:
-            synced_global = await bot.tree.sync()
-            print(f"슬래시 명령어 글로벌 동기화 완료: {len(synced_global)}개", flush=True)
-
-            guild_sync_count = 0
-            for guild in bot.guilds:
-                try:
-                    bot.tree.copy_global_to(guild=guild)
-                    synced_guild = await bot.tree.sync(guild=guild)
-                    guild_sync_count += len(synced_guild)
-                    print(f"길드 슬래시 동기화 완료: {guild.name} ({guild.id}) / {len(synced_guild)}개", flush=True)
-                except Exception as guild_error:
-                    print(f"길드 슬래시 동기화 실패: {guild.name} ({guild.id}) / {guild_error}", flush=True)
-
-            slash_sync_done = True
-            print(f"슬래시 명령어 동기화 완료: 글로벌 {len(synced_global)}개, 길드 누적 {guild_sync_count}개", flush=True)
-        except Exception as e:
-            print(f"슬래시 명령어 동기화 실패: {e}", flush=True)
-
-    try:
-        load_schedule()
-        load_colors()
-        load_music_data()
-
-        cookie_file = resolve_cookie_file()
-        if cookie_file:
-            print(f"yt-dlp cookies 적용됨: {cookie_file}")
-        else:
-            print("yt-dlp cookies 미적용: 쿠키 없이 우회 모드로 시도할게")
-        print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}")
-        print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
-
-        await ensure_lavalink_ready()
-
-        if os.path.exists(RESTART_FILE):
-            try:
-                os.replace(RESTART_FILE, RESTART_PROCESSING_FILE)
-
-                with open(RESTART_PROCESSING_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                channel_id = data.get("channel_id")
-                message_id = data.get("message_id")
-                guild_id = data.get("guild_id")
-                voice_channel_id = data.get("voice_channel_id")
-                last_query = data.get("last_query")
-                queue_data = data.get("queue", [])
-                repeat_state = data.get("repeat", False)
-
-                if channel_id and message_id:
-                    channel = bot.get_channel(channel_id)
-                    if channel:
-                        try:
-                            msg = await channel.fetch_message(message_id)
-                            await msg.edit(content="✅ 재시동 완료!")
-                        except Exception:
-                            await channel.send("✅ 재시동 완료!")
-
-                if guild_id:
-                    guild = bot.get_guild(guild_id)
-                    if guild:
-                        state = get_music_state(guild_id)
-                        if last_query:
-                            state["last_query"] = last_query
-                        state["repeat"] = repeat_state
-                        state["restored_queue"] = [q for q in queue_data if isinstance(q, str)]
-
-                        if voice_channel_id:
-                            voice_channel = bot.get_channel(voice_channel_id)
-                            if voice_channel and getattr(voice_channel, "connect", None):
-                                try:
-                                    if guild.voice_client is None:
-                                        await voice_channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-                                    else:
-                                        player = guild.voice_client
-                                        if isinstance(player, wavelink.Player):
-                                            await player.move_to(voice_channel)
-                                        else:
-                                            await guild.voice_client.move_to(voice_channel)
-                                    state["last_voice_channel_id"] = voice_channel_id
-                                except Exception as e:
-                                    print(f"자동 재입장 실패: {e}")
-
-                if os.path.exists(RESTART_PROCESSING_FILE):
-                    os.remove(RESTART_PROCESSING_FILE)
-            except FileNotFoundError:
-                pass
-            except Exception as e:
-                print(f"재시동 완료 처리 실패: {e}")
-                if os.path.exists(RESTART_PROCESSING_FILE):
-                    os.remove(RESTART_PROCESSING_FILE)
-
-        if not schedule_task_started:
-            bot.loop.create_task(check_schedule())
-            schedule_task_started = True
-
-    except Exception as e:
-        print(f"초기화 오류: {e}")
-
+        slash_sync_done = True
+        print("슬래시 명령어는 setup_hook에서 글로벌 동기화만 사용함", flush=True)
 
 @bot.event
 async def on_message(message):
