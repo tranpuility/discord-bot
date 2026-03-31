@@ -1374,6 +1374,29 @@ def get_music_state(guild_id: int):
         }
     return music_states[guild_id]
 
+async def ensure_live_player_for_guild(guild_id: int):
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return None
+
+    player = guild.voice_client if isinstance(guild.voice_client, wavelink.Player) else None
+    state = get_music_state(guild_id)
+    channel_id = state.get("last_voice_channel_id")
+
+    if channel_id is None:
+        return player
+
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return player
+
+    try:
+        return await ensure_player_node(player, channel)
+    except Exception as e:
+        print(f"[music] ensure_live_player_for_guild 실패: {e}", flush=True)
+        return player
+
+
 
 async def send_queue_list(channel, guild_id: int):
     queue = get_guild_queue(guild_id)
@@ -1524,7 +1547,7 @@ async def play_next(guild_id: int):
         return
 
     try:
-        player = await ensure_player_node(player, player.channel)
+        player = await ensure_live_player_for_guild(guild_id) or player
     except Exception as reconnect_error:
         state["current"] = None
         save_music_data()
@@ -1546,7 +1569,9 @@ async def play_next(guild_id: int):
         state["restored_queue"] = [saved_query for _, saved_query in (unpack_queue_item(item) for item in queue) if isinstance(saved_query, str)]
         save_music_data()
 
+        print(f"[music] node_connected={has_connected_wavelink_node()} player_channel={getattr(getattr(player, 'channel', None), 'id', None)}", flush=True)
         await player.play(track)
+        print(f"[music] wavelink play 시작: guild={guild_id} title={getattr(track, 'title', query)}", flush=True)
 
         extra_line = ""
         if matched_query != query:
@@ -2461,19 +2486,21 @@ class MusicView(discord.ui.View):
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.primary, row=0)
     async def toggle_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
-        player = self.get_player()
-        if player is None:
-            await interaction.response.send_message("음성 채널에 없어", ephemeral=True)
+        player = await ensure_live_player_for_guild(self.guild_id)
+        if not isinstance(player, wavelink.Player):
+            await interaction.response.send_message("플레이어가 없어", ephemeral=True)
             return
 
-        if player_is_playing(player):
-            await player.pause(True)
-            await interaction.response.send_message("⏸️ 일시정지", ephemeral=True)
-        elif player_is_paused(player):
-            await player.pause(False)
-            await interaction.response.send_message("▶️ 다시 재생", ephemeral=True)
-        else:
-            await interaction.response.send_message("현재 재생 중인 노래가 없어", ephemeral=True)
+        try:
+            if player_is_paused(player):
+                await player.pause(False)
+                await interaction.response.send_message("▶ 다시 재생할게", ephemeral=True)
+            else:
+                await player.pause(True)
+                await interaction.response.send_message("⏸ 일시정지했어", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 일시정지/재생 실패: {e}", ephemeral=True)
+
 
     @discord.ui.button(label="⏹", style=discord.ButtonStyle.danger, row=0)
     async def stop_song(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2609,7 +2636,6 @@ async def on_ready():
                     print(f"길드 전용 슬래시 명령 초기화 완료: {guild.name} ({guild.id})", flush=True)
                 except Exception as guild_error:
                     print(f"길드 전용 슬래시 명령 초기화 실패: {guild.name} ({guild.id}) / {guild_error}", flush=True)
-
             slash_sync_done = True
             print("글로벌 슬래시만 남기고 길드 전용 슬래시를 정리했어", flush=True)
         except Exception as e:
@@ -2619,13 +2645,11 @@ async def on_ready():
         load_schedule()
         load_colors()
         load_music_data()
-
         cookie_file = resolve_cookie_file()
         if cookie_file:
             print(f"[쿠키] 사용 중: {cookie_file}", flush=True)
         else:
             print("[쿠키] 사용 안 함", flush=True)
-
         await ensure_lavalink_ready()
     except Exception as e:
         print(f"[초기화 오류] {e}", flush=True)
@@ -2642,12 +2666,14 @@ async def on_message(message):
 
 
 @bot.event
-async def on_wavelink_node_ready(node, resumed: bool):
-    print(f"[wavelink] node ready: resumed={resumed}", flush=True)
+async def on_wavelink_node_ready(*args, **kwargs):
+    print(f"[wavelink] node ready args={len(args)} kwargs={list(kwargs.keys())}", flush=True)
+
 
 @bot.event
-async def on_wavelink_node_closed(node, disconnected):
-    print(f"[wavelink] node closed: disconnected={disconnected}", flush=True)
+async def on_wavelink_node_closed(*args, **kwargs):
+    print(f"[wavelink] node closed args={len(args)} kwargs={list(kwargs.keys())}", flush=True)
+
 
 @bot.event
 async def on_wavelink_track_end(payload):
