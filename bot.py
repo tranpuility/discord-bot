@@ -2546,8 +2546,19 @@ async def on_ready():
     print(f"로그인 완료: {bot.user}", flush=True)
 
     if not slash_sync_done:
-        slash_sync_done = True
-        print("슬래시 명령어는 setup_hook에서 글로벌 동기화만 사용함", flush=True)
+        try:
+            for guild in bot.guilds:
+                try:
+                    bot.tree.clear_commands(guild=guild)
+                    await bot.tree.sync(guild=guild)
+                    print(f"길드 전용 슬래시 명령 초기화 완료: {guild.name} ({guild.id})", flush=True)
+                except Exception as guild_error:
+                    print(f"길드 전용 슬래시 명령 초기화 실패: {guild.name} ({guild.id}) / {guild_error}", flush=True)
+
+            slash_sync_done = True
+            print("글로벌 슬래시만 남기고 길드 전용 슬래시를 정리했어", flush=True)
+        except Exception as e:
+            print(f"길드 전용 슬래시 정리 실패: {e}", flush=True)
 
 @bot.event
 async def on_message(message):
