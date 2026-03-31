@@ -2636,6 +2636,7 @@ async def on_ready():
     global slash_sync_done
 
     print(f"로그인 완료: {bot.user}", flush=True)
+    print(f"[music-backend] desired={MUSIC_BACKEND} active={get_active_music_backend()} auto_fallback={MUSIC_AUTO_FALLBACK}", flush=True)
 
     if not slash_sync_done:
         slash_sync_done = True
