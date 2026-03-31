@@ -36,5 +36,5 @@ build/
 # 빌드 최적화 (Railway)
 ffmpeg-*
 *.pdf
-*.ttf
+# *.ttf
 *.png
