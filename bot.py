@@ -204,7 +204,7 @@ async def ensure_player_node(player, channel):
     await ensure_lavalink_ready()
 
     if player is None:
-        return await channel.connect(cls=wavelink.Player, self_deaf=True, self_mute=False)
+        return await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
 
     if not isinstance(player, wavelink.Player):
         try:
@@ -214,7 +214,7 @@ async def ensure_player_node(player, channel):
                 await player.disconnect()
             except Exception:
                 pass
-        return await channel.connect(cls=wavelink.Player, self_deaf=True, self_mute=False)
+        return await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
 
     current_node = getattr(player, "node", None)
     if current_node is None or not has_connected_wavelink_node():
@@ -222,7 +222,7 @@ async def ensure_player_node(player, channel):
             await player.disconnect()
         except Exception:
             pass
-        return await channel.connect(cls=wavelink.Player, self_deaf=True, self_mute=False)
+        return await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
 
     if getattr(player, "channel", None) != channel:
         await player.move_to(channel)
@@ -230,8 +230,7 @@ async def ensure_player_node(player, channel):
 
 
 def resolve_voice_client(ctx):
-    vc = ctx.voice_client
-    return vc if isinstance(vc, wavelink.Player) else None
+    return getattr(ctx, "voice_client", None)
 
 
 def player_is_playing(player) -> bool:
@@ -265,32 +264,92 @@ def player_is_paused(player) -> bool:
 
 
 async def get_or_connect_player(ctx):
-    await ensure_lavalink_ready()
-
     if ctx.author.voice is None or ctx.author.voice.channel is None:
         raise ValueError("음성 채널 먼저 들어가줘")
 
     channel = ctx.author.voice.channel
-    existing_vc = ctx.voice_client
-    player = resolve_voice_client(ctx)
 
-    if existing_vc is not None and player is None:
+    if MUSIC_BACKEND == "lavalink":
+        await try_restore_lavalink_backend()
+
+    if use_lavalink_backend():
         try:
-            await existing_vc.disconnect(force=True)
-        except Exception:
-            try:
-                await existing_vc.disconnect()
-            except Exception:
-                pass
-        player = None
+            await ensure_lavalink_ready()
+            existing_vc = ctx.voice_client
+            player = existing_vc if isinstance(existing_vc, wavelink.Player) else None
 
-    player = await ensure_player_node(player, channel)
+            if existing_vc is not None and player is None:
+                try:
+                    await existing_vc.disconnect(force=True)
+                except Exception:
+                    try:
+                        await existing_vc.disconnect()
+                    except Exception:
+                        pass
+                await asyncio.sleep(1.0)
+                existing_vc = None
+                player = None
+
+            if player is not None and getattr(player, "channel", None) != channel:
+                try:
+                    await player.move_to(channel)
+                except Exception:
+                    try:
+                        await player.disconnect(force=True)
+                    except Exception:
+                        try:
+                            await player.disconnect()
+                        except Exception:
+                            pass
+                    await asyncio.sleep(1.0)
+                    player = None
+
+            player = await ensure_player_node(player, channel)
+            vc = player
+        except Exception as e:
+            if MUSIC_AUTO_FALLBACK and MUSIC_BACKEND == "lavalink":
+                set_active_music_backend("direct", f"플레이어 연결 실패 후 자동 전환: {e}")
+                vc = ctx.voice_client
+                if vc is not None and isinstance(vc, wavelink.Player):
+                    try:
+                        await vc.disconnect(force=True)
+                    except Exception:
+                        try:
+                            await vc.disconnect()
+                        except Exception:
+                            pass
+                    await asyncio.sleep(1.0)
+                    vc = None
+
+                if vc is None:
+                    vc = await channel.connect(self_deaf=False)
+                elif getattr(vc, "channel", None) != channel:
+                    await vc.move_to(channel)
+            else:
+                raise
+    else:
+        vc = ctx.voice_client
+        if vc is not None and isinstance(vc, wavelink.Player):
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                try:
+                    await vc.disconnect()
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
+            vc = None
+
+        if vc is None:
+            vc = await channel.connect(self_deaf=False)
+        elif getattr(vc, "channel", None) != channel:
+            await vc.move_to(channel)
 
     state = get_music_state(ctx.guild.id)
     state["last_voice_channel_id"] = channel.id
     state["last_text_channel_id"] = ctx.channel.id
     save_music_data()
-    return player
+    return vc
 
 
 async def search_lavalink_track(query: str):
@@ -2928,7 +2987,8 @@ async def join(ctx):
         if use_lavalink_backend():
             await ensure_lavalink_ready()
             existing_vc = ctx.voice_client
-            player = resolve_voice_client(ctx)
+            player = existing_vc if isinstance(existing_vc, wavelink.Player) else None
+
             if existing_vc is not None and player is None:
                 try:
                     await existing_vc.disconnect(force=True)
@@ -2937,15 +2997,40 @@ async def join(ctx):
                         await existing_vc.disconnect()
                     except Exception:
                         pass
-            player = resolve_voice_client(ctx)
+                await asyncio.sleep(1.0)
+                existing_vc = None
+                player = None
+
             if player is None:
                 await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-            else:
-                await player.move_to(channel)
+            elif getattr(player, "channel", None) != channel:
+                try:
+                    await player.move_to(channel)
+                except Exception:
+                    try:
+                        await player.disconnect(force=True)
+                    except Exception:
+                        try:
+                            await player.disconnect()
+                        except Exception:
+                            pass
+                    await asyncio.sleep(1.0)
+                    await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
         else:
             vc = ctx.voice_client
+            if vc is not None and isinstance(vc, wavelink.Player):
+                try:
+                    await vc.disconnect(force=True)
+                except Exception:
+                    try:
+                        await vc.disconnect()
+                    except Exception:
+                        pass
+                await asyncio.sleep(1.0)
+                vc = None
+
             if vc is None:
-                await channel.connect(self_deaf=True)
+                await channel.connect(self_deaf=False)
             elif getattr(vc, "channel", None) != channel:
                 await vc.move_to(channel)
 
@@ -2962,10 +3047,18 @@ async def join(ctx):
             try:
                 set_active_music_backend("direct", f"입장 명령 실패 후 자동 전환: {e}")
                 vc = ctx.voice_client
-                if vc is None:
-                    await channel.connect(self_deaf=True)
-                elif getattr(vc, "channel", None) != channel:
-                    await vc.move_to(channel)
+                if vc is not None:
+                    try:
+                        await vc.disconnect(force=True)
+                    except Exception:
+                        try:
+                            await vc.disconnect()
+                        except Exception:
+                            pass
+                    await asyncio.sleep(1.0)
+                    vc = None
+
+                await channel.connect(self_deaf=False)
                 await ctx.send(f"✅ {channel.name} 입장 완료 (Direct 자동전환)")
             except Exception as fallback_error:
                 await ctx.send(f"❌ 입장 실패: {fallback_error}")
@@ -2988,8 +3081,26 @@ async def leave(ctx):
         state["restored_queue"] = []
         save_music_data()
 
-        player = resolve_voice_client(ctx) or ctx.voice_client
-        await player.disconnect()
+        player = ctx.voice_client
+        try:
+            if isinstance(player, wavelink.Player):
+                try:
+                    await player.stop()
+                except Exception:
+                    pass
+                try:
+                    await player.disconnect(force=True)
+                except Exception:
+                    await player.disconnect()
+            else:
+                await player.disconnect()
+        except Exception as e:
+            await ctx.send(f"❌ 퇴장 실패: {e}")
+            return
+
+        if MUSIC_BACKEND == "lavalink":
+            set_active_music_backend("lavalink", "퇴장 후 상태 초기화")
+        await asyncio.sleep(1.0)
         await ctx.send("👋 퇴장 완료")
     else:
         await ctx.send("음성 채널에 없음")
