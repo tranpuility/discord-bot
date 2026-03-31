@@ -176,8 +176,7 @@ async def ensure_player_node(player, channel):
 
 
 def resolve_voice_client(ctx):
-    vc = ctx.voice_client
-    return vc if isinstance(vc, wavelink.Player) else None
+    return getattr(ctx, "voice_client", None)
 
 
 def player_is_playing(player) -> bool:
@@ -211,32 +210,22 @@ def player_is_paused(player) -> bool:
 
 
 async def get_or_connect_player(ctx):
-    await ensure_lavalink_ready()
-
     if ctx.author.voice is None or ctx.author.voice.channel is None:
         raise ValueError("음성 채널 먼저 들어가줘")
 
     channel = ctx.author.voice.channel
-    existing_vc = ctx.voice_client
-    player = resolve_voice_client(ctx)
+    vc = ctx.voice_client
 
-    if existing_vc is not None and player is None:
-        try:
-            await existing_vc.disconnect(force=True)
-        except Exception:
-            try:
-                await existing_vc.disconnect()
-            except Exception:
-                pass
-        player = None
-
-    player = await ensure_player_node(player, channel)
+    if vc is None:
+        vc = await channel.connect(self_deaf=True)
+    elif getattr(vc, "channel", None) != channel:
+        await vc.move_to(channel)
 
     state = get_music_state(ctx.guild.id)
     state["last_voice_channel_id"] = channel.id
     state["last_text_channel_id"] = ctx.channel.id
     save_music_data()
-    return player
+    return vc
 
 
 async def search_lavalink_track(query: str):
@@ -1529,7 +1518,7 @@ async def play_next(guild_id: int):
         save_music_data()
         return
 
-    player = guild.voice_client if isinstance(guild.voice_client, wavelink.Player) else None
+    vc = guild.voice_client
 
     if not queue:
         state["current"] = None
@@ -1540,52 +1529,49 @@ async def play_next(guild_id: int):
     if channel_id:
         state["last_text_channel_id"] = channel_id
 
-    if player is None:
+    if vc is None:
         state["current"] = None
         save_music_data()
         await send_music_message(guild_id, "❌ 음성 채널 연결이 끊어졌어. 다시 /입장 후 /재생 해줘")
         return
 
     try:
-        player = await ensure_live_player_for_guild(guild_id) or player
-    except Exception as reconnect_error:
-        state["current"] = None
-        save_music_data()
-        await send_music_message(guild_id, f"❌ 음악 노드 재연결 실패: {reconnect_error}")
-        return
-
-    try:
-        track, matched_query = await search_lavalink_track(query)
+        source, attempted_queries = await try_resolve_player_with_fallback(query)
 
         state["current"] = {
-            "title": getattr(track, "title", query),
+            "title": getattr(source, "title", query),
             "query": query,
-            "url": getattr(track, "uri", None)
+            "url": getattr(source, "webpage_url", None)
         }
         state["last_query"] = query
         state["fail_count"] = 0
-        if getattr(player, "channel", None):
-            state["last_voice_channel_id"] = player.channel.id
+        if getattr(vc, "channel", None):
+            state["last_voice_channel_id"] = vc.channel.id
         state["restored_queue"] = [saved_query for _, saved_query in (unpack_queue_item(item) for item in queue) if isinstance(saved_query, str)]
         save_music_data()
 
-        print(f"[music] node_connected={has_connected_wavelink_node()} player_channel={getattr(getattr(player, 'channel', None), 'id', None)}", flush=True)
-        await player.play(track)
-        print(f"[music] wavelink play 시작: guild={guild_id} title={getattr(track, 'title', query)}", flush=True)
+        def after_play(error):
+            if error:
+                print(f"[music] direct playback after error: {error}", flush=True)
+            fut = play_next(guild_id)
+            bot.loop.call_soon_threadsafe(asyncio.create_task, fut)
+
+        vc.play(source, after=after_play)
+        print(f"[music] direct ffmpeg play 시작: guild={guild_id} title={getattr(source, 'title', query)}", flush=True)
 
         extra_line = ""
-        if matched_query != query:
-            extra_line = f"\n검색 보정: `{matched_query}`"
+        if attempted_queries and attempted_queries[0] != query:
+            extra_line = f"\n검색 보정: `{attempted_queries[0]}`"
 
         await send_music_message(
             guild_id,
-            f"🎵 재생 중: **{getattr(track, 'title', query)}**\n대기열: {len(queue)}곡{extra_line}",
+            f"🎵 재생 중: **{getattr(source, 'title', query)}**\n대기열: {len(queue)}곡{extra_line}",
             view=MusicView(guild_id)
         )
 
     except Exception as e:
         error_text = str(e)
-        print(f"곡 재생 실패, 자동 스킵: {query} | {error_text}")
+        print(f"곡 재생 실패, 자동 스킵: {query} | {error_text}", flush=True)
 
         state["fail_count"] = state.get("fail_count", 0) + 1
         state["auto_skipped_count"] = state.get("auto_skipped_count", 0) + 1
@@ -2486,20 +2472,23 @@ class MusicView(discord.ui.View):
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.primary, row=0)
     async def toggle_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
-        player = await ensure_live_player_for_guild(self.guild_id)
-        if not isinstance(player, wavelink.Player):
+        player = bot.get_guild(self.guild_id).voice_client if bot.get_guild(self.guild_id) else None
+        if not player:
             await interaction.response.send_message("플레이어가 없어", ephemeral=True)
             return
 
         try:
             if player_is_paused(player):
-                await player.pause(False)
+                player.resume()
                 await interaction.response.send_message("▶ 다시 재생할게", ephemeral=True)
-            else:
-                await player.pause(True)
+            elif player_is_playing(player):
+                player.pause()
                 await interaction.response.send_message("⏸ 일시정지했어", ephemeral=True)
+            else:
+                await interaction.response.send_message("현재 재생 중인 곡이 없어", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ 일시정지/재생 실패: {e}", ephemeral=True)
+
 
 
     @discord.ui.button(label="⏹", style=discord.ButtonStyle.danger, row=0)
@@ -2815,16 +2804,18 @@ async def leave(ctx):
         music_queues[guild_id] = []
 
         state = get_music_state(guild_id)
-        if state.get("current") and state["current"].get("query"):
-            state["last_query"] = state["current"]["query"]
         state["current"] = None
         state["history"] = []
         state["repeat"] = False
         state["restored_queue"] = []
         save_music_data()
 
-        player = resolve_voice_client(ctx) or ctx.voice_client
-        await player.disconnect()
+        try:
+            await ctx.voice_client.disconnect()
+        except Exception as e:
+            await ctx.send(f"❌ 퇴장 실패: {e}")
+            return
+
         await ctx.send("👋 퇴장 완료")
     else:
         await ctx.send("음성 채널에 없음")
@@ -2923,20 +2914,26 @@ async def stop(ctx):
 
 @bot.command(name="일시정지")
 async def pause(ctx):
-    player = resolve_voice_client(ctx)
+    player = resolve_voice_client(ctx) or ctx.voice_client
     if player and player_is_playing(player):
-        await player.pause(True)
-        await ctx.send("⏸️ 일시정지")
+        try:
+            player.pause()
+            await ctx.send("⏸️ 일시정지")
+        except Exception as e:
+            await ctx.send(f"❌ 일시정지 실패: {e}")
     else:
         await ctx.send("현재 재생 중인 노래가 없어")
 
 
 @bot.command(name="다시재생")
 async def resume(ctx):
-    player = resolve_voice_client(ctx)
+    player = resolve_voice_client(ctx) or ctx.voice_client
     if player and player_is_paused(player):
-        await player.pause(False)
-        await ctx.send("▶️ 다시 재생")
+        try:
+            player.resume()
+            await ctx.send("▶️ 다시 재생")
+        except Exception as e:
+            await ctx.send(f"❌ 다시 재생 실패: {e}")
     else:
         await ctx.send("일시정지된 노래가 없어")
 
