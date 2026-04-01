@@ -52,6 +52,60 @@ YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true"
 YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
 
+
+# =========================
+# 음악 백엔드 설정
+# =========================
+MUSIC_BACKEND = (os.getenv("MUSIC_BACKEND") or "lavalink").strip().lower()
+MUSIC_AUTO_FALLBACK = os.getenv("MUSIC_AUTO_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
+MUSIC_AUTO_RESTORE_LAVALINK = os.getenv("MUSIC_AUTO_RESTORE_LAVALINK", "true").lower() in ("1", "true", "yes", "on")
+ACTIVE_MUSIC_BACKEND = MUSIC_BACKEND
+LAST_LAVALINK_RETRY_AT = None
+
+
+def get_active_music_backend() -> str:
+    return ACTIVE_MUSIC_BACKEND
+
+
+def use_lavalink_backend() -> bool:
+    return get_active_music_backend() == "lavalink"
+
+
+def set_active_music_backend(backend: str, reason: str = ""):
+    global ACTIVE_MUSIC_BACKEND, LAST_LAVALINK_RETRY_AT
+    backend = (backend or "direct").strip().lower()
+    if backend not in ("direct", "lavalink"):
+        backend = "direct"
+    if ACTIVE_MUSIC_BACKEND != backend:
+        print(f"[music-backend] 전환: {ACTIVE_MUSIC_BACKEND} -> {backend} | {reason}", flush=True)
+    ACTIVE_MUSIC_BACKEND = backend
+    if backend == "direct":
+        LAST_LAVALINK_RETRY_AT = datetime.now()
+
+
+async def try_restore_lavalink_backend():
+    global LAST_LAVALINK_RETRY_AT
+
+    if MUSIC_BACKEND != "lavalink":
+        return False
+    if not MUSIC_AUTO_RESTORE_LAVALINK:
+        return False
+    if get_active_music_backend() == "lavalink":
+        return True
+
+    now = datetime.now()
+    if LAST_LAVALINK_RETRY_AT and (now - LAST_LAVALINK_RETRY_AT).total_seconds() < 60:
+        return False
+
+    LAST_LAVALINK_RETRY_AT = now
+    try:
+        await ensure_lavalink_ready()
+        set_active_music_backend("lavalink", "노드 복구 감지")
+        return True
+    except Exception as e:
+        print(f"[music-backend] lavalink 복구 실패: {e}", flush=True)
+        return False
+
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "onglefont.ttf")
@@ -159,128 +213,36 @@ def player_is_paused(player) -> bool:
     return False
 
 
-
-
-async def force_clear_voice_state(guild):
-    if guild is None:
-        return
-
-    vc = guild.voice_client
-    if vc is not None:
-        try:
-            if isinstance(vc, wavelink.Player):
-                try:
-                    await vc.stop()
-                except Exception:
-                    pass
-                try:
-                    await vc.disconnect(force=True)
-                except Exception:
-                    try:
-                        await vc.disconnect()
-                    except Exception:
-                        pass
-            else:
-                try:
-                    await vc.disconnect(force=True)
-                except TypeError:
-                    await vc.disconnect()
-                except Exception:
-                    try:
-                        await vc.disconnect()
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"[voice] disconnect 정리 실패: {e}", flush=True)
-
-    await asyncio.sleep(1.5)
-
-    try:
-        me = guild.me
-    except Exception:
-        me = None
-
-    if me and getattr(me, "voice", None) and getattr(me.voice, "channel", None) is not None:
-        try:
-            await guild.change_voice_state(channel=None, self_mute=False, self_deaf=False)
-            print(f"[voice] guild voice state 강제 해제: {guild.id}", flush=True)
-        except Exception as e:
-            print(f"[voice] guild voice state 해제 실패: {e}", flush=True)
-        await asyncio.sleep(1.5)
-
-
-async def normalize_connected_voice_state(guild, channel):
-    try:
-        await guild.change_voice_state(channel=channel, self_mute=False, self_deaf=False)
-    except Exception as e:
-        print(f"[voice] self mute/deaf 해제 실패: {e}", flush=True)
-
 async def get_or_connect_player(ctx):
+    await ensure_lavalink_ready()
+
     if ctx.author.voice is None or ctx.author.voice.channel is None:
         raise ValueError("음성 채널 먼저 들어가줘")
 
     channel = ctx.author.voice.channel
+    existing_vc = ctx.voice_client
+    player = resolve_voice_client(ctx)
 
-    if MUSIC_BACKEND == "lavalink":
-        await try_restore_lavalink_backend()
-
-    if use_lavalink_backend():
+    if existing_vc is not None and player is None:
         try:
-            await ensure_lavalink_ready()
-            existing_vc = ctx.voice_client
-            player = existing_vc if isinstance(existing_vc, wavelink.Player) else None
+            await existing_vc.disconnect(force=True)
+        except Exception:
+            try:
+                await existing_vc.disconnect()
+            except Exception:
+                pass
+        player = None
 
-            if existing_vc is None and ctx.guild.me and getattr(ctx.guild.me, "voice", None) and getattr(ctx.guild.me.voice, "channel", None) is not None:
-                await force_clear_voice_state(ctx.guild)
-                existing_vc = None
-                player = None
-
-            if existing_vc is not None and player is None:
-                await force_clear_voice_state(ctx.guild)
-                existing_vc = None
-                player = None
-
-            if player is not None and getattr(player, "channel", None) != channel:
-                try:
-                    await player.move_to(channel)
-                    await normalize_connected_voice_state(ctx.guild, channel)
-                except Exception:
-                    await force_clear_voice_state(ctx.guild)
-                    player = None
-
-            if player is None:
-                player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-                await normalize_connected_voice_state(ctx.guild, channel)
-
-            vc = player
-        except Exception as e:
-            if MUSIC_AUTO_FALLBACK and MUSIC_BACKEND == "lavalink":
-                set_active_music_backend("direct", f"플레이어 연결 실패 후 자동 전환: {e}")
-                await force_clear_voice_state(ctx.guild)
-                vc = ctx.guild.voice_client
-                if vc is None:
-                    vc = await channel.connect(self_deaf=False)
-                elif getattr(vc, "channel", None) != channel:
-                    await vc.move_to(channel)
-                await normalize_connected_voice_state(ctx.guild, channel)
-            else:
-                raise
-    else:
-        if isinstance(ctx.voice_client, wavelink.Player) or (ctx.guild.me and getattr(ctx.guild.me, "voice", None) and getattr(ctx.guild.me.voice, "channel", None) is not None and ctx.voice_client is None):
-            await force_clear_voice_state(ctx.guild)
-
-        vc = ctx.voice_client
-        if vc is None:
-            vc = await channel.connect(self_deaf=False)
-        elif getattr(vc, "channel", None) != channel:
-            await vc.move_to(channel)
-        await normalize_connected_voice_state(ctx.guild, channel)
+    if player is None:
+        player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+    elif player.channel != channel:
+        await player.move_to(channel)
 
     state = get_music_state(ctx.guild.id)
     state["last_voice_channel_id"] = channel.id
     state["last_text_channel_id"] = ctx.channel.id
     save_music_data()
-    return vc
+    return player
 
 
 async def search_lavalink_track(query: str):
@@ -2633,14 +2595,109 @@ class MusicView(discord.ui.View):
 # =========================
 @bot.event
 async def on_ready():
-    global slash_sync_done
-
+    global schedule_task_started, slash_sync_done
     print(f"로그인 완료: {bot.user}", flush=True)
-    print(f"[music-backend] desired={MUSIC_BACKEND} active={get_active_music_backend()} auto_fallback={MUSIC_AUTO_FALLBACK}", flush=True)
 
     if not slash_sync_done:
-        slash_sync_done = True
-        print("슬래시 명령어는 setup_hook에서 글로벌 동기화만 사용함", flush=True)
+        try:
+            synced_global = await bot.tree.sync()
+            print(f"슬래시 명령어 글로벌 동기화 완료: {len(synced_global)}개", flush=True)
+
+            guild_sync_count = 0
+            for guild in bot.guilds:
+                try:
+                    bot.tree.copy_global_to(guild=guild)
+                    synced_guild = await bot.tree.sync(guild=guild)
+                    guild_sync_count += len(synced_guild)
+                    print(f"길드 슬래시 동기화 완료: {guild.name} ({guild.id}) / {len(synced_guild)}개", flush=True)
+                except Exception as guild_error:
+                    print(f"길드 슬래시 동기화 실패: {guild.name} ({guild.id}) / {guild_error}", flush=True)
+
+            slash_sync_done = True
+            print(f"슬래시 명령어 동기화 완료: 글로벌 {len(synced_global)}개, 길드 누적 {guild_sync_count}개", flush=True)
+        except Exception as e:
+            print(f"슬래시 명령어 동기화 실패: {e}", flush=True)
+
+    try:
+        load_schedule()
+        load_colors()
+        load_music_data()
+
+        cookie_file = resolve_cookie_file()
+        if cookie_file:
+            print(f"yt-dlp cookies 적용됨: {cookie_file}")
+        else:
+            print("yt-dlp cookies 미적용: 쿠키 없이 우회 모드로 시도할게")
+        print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}")
+        print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
+
+        await ensure_lavalink_ready()
+
+        if os.path.exists(RESTART_FILE):
+            try:
+                os.replace(RESTART_FILE, RESTART_PROCESSING_FILE)
+
+                with open(RESTART_PROCESSING_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                channel_id = data.get("channel_id")
+                message_id = data.get("message_id")
+                guild_id = data.get("guild_id")
+                voice_channel_id = data.get("voice_channel_id")
+                last_query = data.get("last_query")
+                queue_data = data.get("queue", [])
+                repeat_state = data.get("repeat", False)
+
+                if channel_id and message_id:
+                    channel = bot.get_channel(channel_id)
+                    if channel:
+                        try:
+                            msg = await channel.fetch_message(message_id)
+                            await msg.edit(content="✅ 재시동 완료!")
+                        except Exception:
+                            await channel.send("✅ 재시동 완료!")
+
+                if guild_id:
+                    guild = bot.get_guild(guild_id)
+                    if guild:
+                        state = get_music_state(guild_id)
+                        if last_query:
+                            state["last_query"] = last_query
+                        state["repeat"] = repeat_state
+                        state["restored_queue"] = [q for q in queue_data if isinstance(q, str)]
+
+                        if voice_channel_id:
+                            voice_channel = bot.get_channel(voice_channel_id)
+                            if voice_channel and getattr(voice_channel, "connect", None):
+                                try:
+                                    if guild.voice_client is None:
+                                        await voice_channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+                                    else:
+                                        player = guild.voice_client
+                                        if isinstance(player, wavelink.Player):
+                                            await player.move_to(voice_channel)
+                                        else:
+                                            await guild.voice_client.move_to(voice_channel)
+                                    state["last_voice_channel_id"] = voice_channel_id
+                                except Exception as e:
+                                    print(f"자동 재입장 실패: {e}")
+
+                if os.path.exists(RESTART_PROCESSING_FILE):
+                    os.remove(RESTART_PROCESSING_FILE)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                print(f"재시동 완료 처리 실패: {e}")
+                if os.path.exists(RESTART_PROCESSING_FILE):
+                    os.remove(RESTART_PROCESSING_FILE)
+
+        if not schedule_task_started:
+            bot.loop.create_task(check_schedule())
+            schedule_task_started = True
+
+    except Exception as e:
+        print(f"초기화 오류: {e}")
+
 
 @bot.event
 async def on_message(message):
@@ -2754,71 +2811,37 @@ async def join(ctx):
     channel = ctx.author.voice.channel
 
     try:
-        if MUSIC_BACKEND == "lavalink":
-            await try_restore_lavalink_backend()
-
-        if use_lavalink_backend():
-            await ensure_lavalink_ready()
-            existing_vc = ctx.voice_client
-            player = existing_vc if isinstance(existing_vc, wavelink.Player) else None
-
-            if existing_vc is None and ctx.guild.me and getattr(ctx.guild.me, "voice", None) and getattr(ctx.guild.me.voice, "channel", None) is not None:
-                await force_clear_voice_state(ctx.guild)
-                existing_vc = None
-                player = None
-
-            if existing_vc is not None and player is None:
-                await force_clear_voice_state(ctx.guild)
-                existing_vc = None
-                player = None
-
-            if player is None:
-                await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-                await normalize_connected_voice_state(ctx.guild, channel)
-            elif getattr(player, "channel", None) != channel:
+        await ensure_lavalink_ready()
+        existing_vc = ctx.voice_client
+        player = resolve_voice_client(ctx)
+        if existing_vc is not None and player is None:
+            try:
+                await existing_vc.disconnect(force=True)
+            except Exception:
                 try:
-                    await player.move_to(channel)
-                    await normalize_connected_voice_state(ctx.guild, channel)
+                    await existing_vc.disconnect()
                 except Exception:
-                    await force_clear_voice_state(ctx.guild)
-                    await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-                    await normalize_connected_voice_state(ctx.guild, channel)
+                    pass
+        player = resolve_voice_client(ctx)
+        if player is None:
+            await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
         else:
-            if isinstance(ctx.voice_client, wavelink.Player) or (ctx.guild.me and getattr(ctx.guild.me, "voice", None) and getattr(ctx.guild.me.voice, "channel", None) is not None and ctx.voice_client is None):
-                await force_clear_voice_state(ctx.guild)
-
-            vc = ctx.voice_client
-            if vc is None:
-                await channel.connect(self_deaf=False)
-            elif getattr(vc, "channel", None) != channel:
-                await vc.move_to(channel)
-            await normalize_connected_voice_state(ctx.guild, channel)
+            await player.move_to(channel)
 
         state = get_music_state(ctx.guild.id)
         state["last_voice_channel_id"] = channel.id
         state["last_text_channel_id"] = ctx.channel.id
         save_music_data()
 
-        backend_label = "Lavalink" if use_lavalink_backend() else "Direct"
-        await ctx.send(f"✅ {channel.name} 입장 완료 ({backend_label})")
+        await ctx.send(f"✅ {channel.name} 입장 완료")
 
     except Exception as e:
-        if MUSIC_AUTO_FALLBACK and MUSIC_BACKEND == "lavalink":
-            try:
-                set_active_music_backend("direct", f"입장 명령 실패 후 자동 전환: {e}")
-                await force_clear_voice_state(ctx.guild)
-                await channel.connect(self_deaf=False)
-                await normalize_connected_voice_state(ctx.guild, channel)
-                await ctx.send(f"✅ {channel.name} 입장 완료 (Direct 자동전환)")
-            except Exception as fallback_error:
-                await ctx.send(f"❌ 입장 실패: {fallback_error}")
-        else:
-            await ctx.send(f"❌ 입장 실패: {e}")
+        await ctx.send(f"❌ 입장 실패: {e}")
 
 
 @bot.command(name="퇴장")
 async def leave(ctx):
-    if ctx.voice_client or (ctx.guild.me and getattr(ctx.guild.me, "voice", None) and getattr(ctx.guild.me.voice, "channel", None) is not None):
+    if ctx.voice_client:
         guild_id = ctx.guild.id
         music_queues[guild_id] = []
 
@@ -2831,12 +2854,8 @@ async def leave(ctx):
         state["restored_queue"] = []
         save_music_data()
 
-        try:
-            await force_clear_voice_state(ctx.guild)
-        except Exception as e:
-            await ctx.send(f"❌ 퇴장 실패: {e}")
-            return
-
+        player = resolve_voice_client(ctx) or ctx.voice_client
+        await player.disconnect()
         await ctx.send("👋 퇴장 완료")
     else:
         await ctx.send("음성 채널에 없음")
@@ -3127,29 +3146,115 @@ async def list_schedule(ctx):
     await send_schedule_list_message(ctx)
 
 
+class SlashContextAdapter:
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.guild = interaction.guild
+        self.channel = interaction.channel
+        self.voice_client = interaction.guild.voice_client if interaction.guild else None
+
+    async def send(self, content=None, **kwargs):
+        if not self.interaction.response.is_done():
+            await self.interaction.response.send_message(content, **kwargs)
+        else:
+            await self.interaction.followup.send(content, **kwargs)
 
 
-# =========================
-# 슬래시 컨텍스트 / 슬래시 명령어
-# =========================
+@bot.tree.command(name="입장", description="현재 들어가 있는 음성 채널에 입장합니다")
+async def slash_join(interaction: discord.Interaction):
+    await join(SlashContextAdapter(interaction))
 
 
+@bot.tree.command(name="퇴장", description="음성 채널에서 퇴장합니다")
+async def slash_leave(interaction: discord.Interaction):
+    await leave(SlashContextAdapter(interaction))
 
 
+@bot.tree.command(name="재생", description="노래 제목이나 유튜브 링크를 재생합니다")
+@app_commands.describe(query="노래 제목 또는 유튜브 링크")
+async def slash_play(interaction: discord.Interaction, query: str | None = None):
+    await play(SlashContextAdapter(interaction), query=query)
 
 
+@bot.tree.command(name="정지", description="현재 재생 중인 노래를 정지합니다")
+async def slash_stop(interaction: discord.Interaction):
+    await stop(SlashContextAdapter(interaction))
 
 
+@bot.tree.command(name="일시정지", description="현재 재생 중인 노래를 일시정지합니다")
+async def slash_pause(interaction: discord.Interaction):
+    await pause(SlashContextAdapter(interaction))
 
 
+@bot.tree.command(name="다시재생", description="일시정지한 노래를 다시 재생합니다")
+async def slash_resume(interaction: discord.Interaction):
+    await resume(SlashContextAdapter(interaction))
 
 
+@bot.tree.command(name="노래리스트", description="현재 대기열을 보여줍니다")
+async def slash_queue_list(interaction: discord.Interaction):
+    await queue_list(SlashContextAdapter(interaction))
 
 
+@bot.tree.command(name="플레이리스트정보", description="유튜브 플레이리스트 정보를 보여줍니다")
+@app_commands.describe(query="유튜브 플레이리스트 URL")
+async def slash_playlist_info(interaction: discord.Interaction, query: str):
+    await playlist_info(SlashContextAdapter(interaction), query=query)
 
 
+@bot.tree.command(name="가사", description="노래 가사를 보여줍니다")
+@app_commands.describe(song="가수 - 제목 형식 권장")
+async def slash_lyrics(interaction: discord.Interaction, song: str | None = None):
+    await lyrics(SlashContextAdapter(interaction), song=song)
 
 
+@bot.tree.command(name="도움말", description="노래와 일정 명령어 도움말을 보여줍니다")
+async def slash_help(interaction: discord.Interaction):
+    await help_command(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="쿠키상태", description="yt-dlp 쿠키 적용 상태를 보여줍니다")
+async def slash_cookie_status(interaction: discord.Interaction):
+    await cookie_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="우회상태", description="유튜브 우회 재생 상태를 보여줍니다")
+async def slash_bypass_status(interaction: discord.Interaction):
+    await bypass_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="음악상태", description="현재 음악 상태를 보여줍니다")
+async def slash_music_status(interaction: discord.Interaction):
+    await music_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="일정추가", description="간단한 일정 하나를 바로 추가합니다")
+@app_commands.describe(date="예: 2026-03-25", time_input="예: 18:00", text="일정 내용")
+async def slash_add_schedule(interaction: discord.Interaction, date: str, time_input: str, text: str):
+    await add_schedule_cmd(SlashContextAdapter(interaction), date, time_input, text=text)
+
+
+@bot.tree.command(name="일정삭제", description="등록된 일정을 삭제합니다")
+@app_commands.describe(index="삭제할 일정 번호")
+async def slash_delete_schedule(interaction: discord.Interaction, index: int):
+    await delete_schedule_cmd(SlashContextAdapter(interaction), index=index)
+
+
+@bot.tree.command(name="캘린더", description="캘린더를 표시합니다")
+@app_commands.describe(year="연도", month="월")
+async def slash_calendar(interaction: discord.Interaction, year: int | None = None, month: int | None = None):
+    await show_calendar(SlashContextAdapter(interaction), year=year, month=month)
+
+
+@bot.tree.command(name="일정목록", description="등록된 일정 목록을 보여줍니다")
+async def slash_schedule_list(interaction: discord.Interaction):
+    await list_schedule(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="재시동", description="봇을 재시동합니다")
+async def slash_restart(interaction: discord.Interaction):
+    await restart(SlashContextAdapter(interaction))
 
 
 # =========================
@@ -3170,15 +3275,149 @@ class InteractionCtx:
         self.author = interaction.user
         self.guild = interaction.guild
         self.channel = interaction.channel
-
-    @property
-    def voice_client(self):
-        return self.guild.voice_client if self.guild else None
+        self.voice_client = interaction.guild.voice_client if interaction.guild else None
 
     async def send(self, content=None, **kwargs):
         if not self.interaction.response.is_done():
             return await self.interaction.response.send_message(content=content, **kwargs)
         return await self.interaction.followup.send(content=content, **kwargs)
+
+def _schedule_sort_key(item):
+    dt = parse_schedule_datetime(item.get("datetime", "")) or datetime.max
+    return (dt, item.get("text", ""))
+
+@bot.tree.command(name="입장", description="현재 들어가 있는 음성 채널에 입장합니다")
+async def slash_join(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await join(InteractionCtx(interaction))
+
+@bot.tree.command(name="퇴장", description="음성 채널에서 퇴장합니다")
+async def slash_leave(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await leave(InteractionCtx(interaction))
+
+@bot.tree.command(name="재생", description="노래 제목이나 유튜브 링크를 재생합니다")
+@app_commands.describe(query="노래 제목 또는 유튜브 링크")
+async def slash_play(interaction: discord.Interaction, query: str):
+    await interaction.response.defer(thinking=False)
+    await play(InteractionCtx(interaction), query=query)
+
+@bot.tree.command(name="정지", description="현재 재생을 정지합니다")
+async def slash_stop(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await stop(InteractionCtx(interaction))
+
+@bot.tree.command(name="일시정지", description="현재 재생을 일시정지합니다")
+async def slash_pause(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await pause(InteractionCtx(interaction))
+
+@bot.tree.command(name="다시재생", description="일시정지된 곡을 다시 재생합니다")
+async def slash_resume(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await resume(InteractionCtx(interaction))
+
+@bot.tree.command(name="노래리스트", description="현재 대기열을 보여줍니다")
+async def slash_queue_list(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await queue_list(InteractionCtx(interaction))
+
+@bot.tree.command(name="플레이리스트정보", description="유튜브 플레이리스트 곡 목록을 보여줍니다")
+@app_commands.describe(query="유튜브 플레이리스트 URL")
+async def slash_playlist_info(interaction: discord.Interaction, query: str):
+    await interaction.response.defer(thinking=False)
+    await playlist_info(InteractionCtx(interaction), query=query)
+
+@bot.tree.command(name="가사", description="노래 가사를 찾아 보여줍니다")
+@app_commands.describe(song="가수 - 제목 또는 노래 제목")
+async def slash_lyrics(interaction: discord.Interaction, song: str):
+    await interaction.response.defer(thinking=False)
+    await lyrics(InteractionCtx(interaction), song=song)
+
+@bot.tree.command(name="도움말", description="명령어 도움말을 보여줍니다")
+async def slash_help(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await help_command(InteractionCtx(interaction))
+
+@bot.tree.command(name="쿠키상태", description="쿠키 적용 상태를 확인합니다")
+async def slash_cookie_status(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await cookie_status(InteractionCtx(interaction))
+
+@bot.tree.command(name="우회상태", description="우회 설정 상태를 확인합니다")
+async def slash_bypass_status(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await bypass_status(InteractionCtx(interaction))
+
+@bot.tree.command(name="음악상태", description="현재 음악 상태를 확인합니다")
+async def slash_music_status(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await music_status(InteractionCtx(interaction))
+
+@bot.tree.command(name="캘린더", description="캘린더를 표시합니다")
+@app_commands.describe(year="연도", month="월")
+async def slash_show_calendar(interaction: discord.Interaction, year: int | None = None, month: int | None = None):
+    await interaction.response.defer(thinking=False)
+    await show_calendar(InteractionCtx(interaction), year=year, month=month)
+
+@bot.tree.command(name="일정목록", description="등록된 일정 목록을 보여줍니다")
+async def slash_list_schedule(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False)
+    await list_schedule(InteractionCtx(interaction))
+
+@bot.tree.command(name="일정추가", description="일정을 등록합니다")
+@app_commands.describe(
+    date="날짜 예: 2026-03-25 또는 20260325",
+    time_input="시간 예: 18:00 또는 18시",
+    text="일정 내용",
+    category="개인/생일/이벤트/업데이트/임시공휴일",
+    repeat="없음/매일/매월/매년/요일반복/평일/주말 또는 월,수,금"
+)
+@app_commands.choices(
+    category=[
+        app_commands.Choice(name="개인일정", value="개인"),
+        app_commands.Choice(name="생일일정", value="생일"),
+        app_commands.Choice(name="이벤트일정", value="이벤트"),
+        app_commands.Choice(name="업데이트일정", value="업데이트"),
+        app_commands.Choice(name="임시공휴일", value="임시공휴일"),
+    ],
+    repeat=[
+        app_commands.Choice(name="없음", value="없음"),
+        app_commands.Choice(name="매일", value="매일"),
+        app_commands.Choice(name="매월", value="매월"),
+        app_commands.Choice(name="매년", value="매년"),
+        app_commands.Choice(name="요일반복(선택창 열기)", value="요일반복"),
+        app_commands.Choice(name="평일", value="평일"),
+        app_commands.Choice(name="주말", value="주말"),
+    ],
+)
+async def slash_add_schedule(interaction: discord.Interaction, date: str, time_input: str, text: str, category: str = "개인", repeat: str = "없음"):
+    try:
+        normalized_date = normalize_schedule_date(date)
+        normalized_time = normalize_schedule_time(time_input)
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+
+    if needs_weekday_selection(repeat):
+        PENDING_WEEKDAY_SCHEDULES[interaction.user.id] = {
+            "date": normalized_date,
+            "time": normalized_time,
+            "text": text,
+            "category": category,
+            "channel_id": interaction.channel_id,
+        }
+        await interaction.response.send_message("요일을 골라줘", view=WeekdayRepeatPickerView(interaction.user.id), ephemeral=True)
+        return
+
+    repeat_type, repeat_days = parse_repeat_rule(repeat)
+    item = build_schedule_item_from_values(
+        normalized_date, normalized_time, text, interaction.user, interaction.channel_id, category, repeat_type, repeat_days
+    )
+    await interaction.response.send_message(
+        f"✅ 일정 등록 완료\n종류: {get_schedule_category_label(item)}\n반복: {repeat_rule_to_text(item)}\n새로: /캘린더 입력하면 반영돼",
+        ephemeral=True
+    )
 
 
 class ScheduleEditModal(discord.ui.Modal, title="일정 수정"):
@@ -3187,11 +3426,42 @@ class ScheduleEditModal(discord.ui.Modal, title="일정 수정"):
         self.item_index = item_index
         item = schedule[item_index]
         dt = parse_schedule_datetime(item.get("datetime", "")) or datetime.now()
-        self.date_input = discord.ui.TextInput(label="날짜", default=dt.strftime("%Y-%m-%d"), placeholder="2026-03-25 또는 20260325", required=True, max_length=20)
-        self.time_input = discord.ui.TextInput(label="시간", default=dt.strftime("%H:%M"), placeholder="18:00 또는 18시", required=True, max_length=20)
-        self.text_input = discord.ui.TextInput(label="일정 내용", default=item.get("text", ""), required=True, max_length=100)
-        self.category_input = discord.ui.TextInput(label="일정 종류", default=get_schedule_category_label(item).replace("일정", ""), placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일", required=False, max_length=30)
-        self.repeat_input = discord.ui.TextInput(label="반복 설정", default=repeat_rule_to_text(item).replace("반복없음", "없음"), placeholder="없음 / 매일 / 매월 / 매년 / 평일 / 주말 / 월,수,금", required=False, max_length=50)
+
+        self.date_input = discord.ui.TextInput(
+            label="날짜",
+            default=dt.strftime("%Y-%m-%d"),
+            placeholder="2026-03-25 또는 20260325",
+            required=True,
+            max_length=20,
+        )
+        self.time_input = discord.ui.TextInput(
+            label="시간",
+            default=dt.strftime("%H:%M"),
+            placeholder="18:00 또는 18시",
+            required=True,
+            max_length=20,
+        )
+        self.text_input = discord.ui.TextInput(
+            label="일정 내용",
+            default=item.get("text", ""),
+            required=True,
+            max_length=100,
+        )
+        self.category_input = discord.ui.TextInput(
+            label="일정 종류",
+            default=get_schedule_category_label(item).replace("일정", ""),
+            placeholder="개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일",
+            required=False,
+            max_length=30,
+        )
+        self.repeat_input = discord.ui.TextInput(
+            label="반복 설정",
+            default=repeat_rule_to_text(item).replace("반복없음", "없음"),
+            placeholder="없음 / 매일 / 매월 / 매년 / 평일 / 주말 / 월,수,금",
+            required=False,
+            max_length=50,
+        )
+
         self.add_item(self.date_input)
         self.add_item(self.time_input)
         self.add_item(self.text_input)
@@ -3207,6 +3477,7 @@ class ScheduleEditModal(discord.ui.Modal, title="일정 수정"):
         except ValueError as e:
             await interaction.response.send_message(f"❌ {e}", ephemeral=True)
             return
+
         item = schedule[self.item_index]
         item["datetime"] = f"{normalized_date} {normalized_time}"
         item["text"] = str(self.text_input.value).strip()
@@ -3214,11 +3485,15 @@ class ScheduleEditModal(discord.ui.Modal, title="일정 수정"):
         item["repeat_type"] = repeat_type
         item["repeat_days"] = repeat_days
         save_schedule()
-        await interaction.response.send_message("✅ 일정 수정 완료\n```" + format_schedule_detail(item, self.item_index) + "```", ephemeral=True)
+
+        await interaction.response.send_message(
+            "✅ 일정 수정 완료\n```" + format_schedule_detail(item, self.item_index) + "```",
+            ephemeral=True
+        )
 
 
 class ScheduleEditSelect(discord.ui.Select):
-    def __init__(self, matched_items):
+    def __init__(self, matched_items: list[tuple[int, dict]]):
         options = []
         for item_index, item in matched_items[:25]:
             dt = parse_schedule_datetime(item.get("datetime", "")) or datetime.now()
@@ -3228,121 +3503,14 @@ class ScheduleEditSelect(discord.ui.Select):
         super().__init__(placeholder="수정할 일정을 골라줘", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(ScheduleEditModal(int(self.values[0])))
+        item_index = int(self.values[0])
+        await interaction.response.send_modal(ScheduleEditModal(item_index))
 
 
 class ScheduleEditSelectView(discord.ui.View):
-    def __init__(self, matched_items):
+    def __init__(self, matched_items: list[tuple[int, dict]]):
         super().__init__(timeout=120)
         self.add_item(ScheduleEditSelect(matched_items))
-
-
-@bot.tree.command(name="입장", description="현재 들어가 있는 음성 채널에 입장합니다")
-async def slash_join(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await join(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="퇴장", description="음성 채널에서 퇴장합니다")
-async def slash_leave(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await leave(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="재생", description="노래 제목이나 유튜브 링크를 재생합니다")
-@app_commands.describe(query="노래 제목 또는 유튜브 링크")
-async def slash_play(interaction: discord.Interaction, query: str):
-    await interaction.response.defer(thinking=False)
-    await play(InteractionCtx(interaction), query=query)
-
-
-@bot.tree.command(name="정지", description="현재 재생을 정지합니다")
-async def slash_stop(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await stop(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="일시정지", description="현재 재생을 일시정지합니다")
-async def slash_pause(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await pause(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="다시재생", description="일시정지된 곡을 다시 재생합니다")
-async def slash_resume(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await resume(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="노래리스트", description="현재 대기열을 보여줍니다")
-async def slash_queue_list(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await queue_list(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="플레이리스트정보", description="유튜브 플레이리스트 곡 목록을 보여줍니다")
-@app_commands.describe(query="유튜브 플레이리스트 URL")
-async def slash_playlist_info(interaction: discord.Interaction, query: str):
-    await interaction.response.defer(thinking=False)
-    await playlist_info(InteractionCtx(interaction), query=query)
-
-
-@bot.tree.command(name="가사", description="노래 가사를 찾아 보여줍니다")
-@app_commands.describe(song="가수 - 제목 또는 노래 제목")
-async def slash_lyrics(interaction: discord.Interaction, song: str):
-    await interaction.response.defer(thinking=False)
-    await lyrics(InteractionCtx(interaction), song=song)
-
-
-@bot.tree.command(name="도움말", description="명령어 도움말을 보여줍니다")
-async def slash_help(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await help_command(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="쿠키상태", description="쿠키 적용 상태를 확인합니다")
-async def slash_cookie_status(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await cookie_status(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="우회상태", description="우회 설정 상태를 확인합니다")
-async def slash_bypass_status(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await bypass_status(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="음악상태", description="현재 음악 상태를 확인합니다")
-async def slash_music_status(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await music_status(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="캘린더", description="캘린더를 표시합니다")
-@app_commands.describe(year="연도", month="월")
-async def slash_show_calendar(interaction: discord.Interaction, year: int | None = None, month: int | None = None):
-    await interaction.response.defer(thinking=False)
-    await show_calendar(InteractionCtx(interaction), year=year, month=month)
-
-
-@bot.tree.command(name="일정목록", description="등록된 일정 목록을 보여줍니다")
-async def slash_list_schedule(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=False)
-    await list_schedule(InteractionCtx(interaction))
-
-
-@bot.tree.command(name="일정추가", description="일정을 등록합니다")
-@app_commands.describe(date="날짜 예: 2026-03-25 또는 20260325", time_input="시간 예: 18:00 또는 18시", text="일정 내용", category="개인/생일/이벤트/업데이트/임시공휴일", repeat="없음/매일/매월/매년/평일/주말/월,수,금")
-async def slash_add_schedule(interaction: discord.Interaction, date: str, time_input: str, text: str, category: str = "개인", repeat: str = "없음"):
-    try:
-        normalized_date = normalize_schedule_date(date)
-        normalized_time = normalize_schedule_time(time_input)
-        repeat_type, repeat_days = parse_repeat_rule(repeat)
-    except ValueError as e:
-        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
-        return
-    item = build_schedule_item_from_values(normalized_date, normalized_time, text, interaction.user, interaction.channel_id, category, repeat_type, repeat_days)
-    await interaction.response.send_message(f"✅ 일정 등록 완료\n종류: {get_schedule_category_label(item)}\n반복: {repeat_rule_to_text(item)}\n새로: /캘린더 입력하면 반영돼", ephemeral=True)
 
 
 @bot.tree.command(name="일정수정", description="날짜를 선택한 뒤 일정을 골라 수정합니다")
@@ -3353,18 +3521,30 @@ async def slash_edit_schedule(interaction: discord.Interaction, date: str):
     except ValueError as e:
         await interaction.response.send_message(f"❌ {e}", ephemeral=True)
         return
-    matched_items = [(i, item) for i, item in enumerate(schedule) if item.get("datetime", "").startswith(normalized_date)]
+
+    matched_items = []
+    for item_index, item in enumerate(schedule):
+        if item.get("datetime", "").startswith(normalized_date):
+            matched_items.append((item_index, item))
+
     if not matched_items:
         await interaction.response.send_message("❌ 해당 날짜에 일정이 없어", ephemeral=True)
         return
+
     if len(matched_items) == 1:
         await interaction.response.send_modal(ScheduleEditModal(matched_items[0][0]))
         return
+
     lines = [f"📅 {normalized_date} 일정 목록"]
     for show_idx, (item_index, item) in enumerate(matched_items, start=1):
         dt = parse_schedule_datetime(item.get("datetime", "")) or datetime.now()
         lines.append(f"{show_idx}. {dt.strftime('%H:%M')} | {item.get('text', '')} | {get_schedule_category_label(item)} | {repeat_rule_to_text(item)}")
-    await interaction.response.send_message("\n".join(lines), view=ScheduleEditSelectView(matched_items), ephemeral=True)
+
+    await interaction.response.send_message(
+        "\n".join(lines),
+        view=ScheduleEditSelectView(matched_items),
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="일정삭제", description="등록된 일정을 삭제합니다")
@@ -3372,7 +3552,6 @@ async def slash_edit_schedule(interaction: discord.Interaction, date: str):
 async def slash_delete_schedule(interaction: discord.Interaction, index: int):
     await interaction.response.defer(thinking=False)
     await delete_schedule_cmd(InteractionCtx(interaction), index=index)
-
 
 @bot.tree.command(name="재시동", description="봇을 재시동합니다")
 async def slash_restart(interaction: discord.Interaction):
