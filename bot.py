@@ -221,95 +221,36 @@ def player_is_paused(player) -> bool:
     return False
 
 
-async def _connect_direct_voice(ctx, channel):
-    existing_vc = ctx.voice_client
-    player = resolve_voice_client(ctx)
-
-    if player is not None:
-        try:
-            await player.disconnect()
-        except Exception:
-            pass
-        existing_vc = None
-
-    voice_client = existing_vc
-    if voice_client is None:
-        voice_client = await channel.connect(self_deaf=False, self_mute=False)
-    elif getattr(voice_client, "channel", None) != channel:
-        await voice_client.move_to(channel)
-
-    return voice_client
-
-
 async def get_or_connect_player(ctx):
+    await ensure_lavalink_ready()
+
     if ctx.author.voice is None or ctx.author.voice.channel is None:
         raise ValueError("음성 채널 먼저 들어가줘")
 
     channel = ctx.author.voice.channel
+    existing_vc = ctx.voice_client
+    player = resolve_voice_client(ctx)
 
-    if use_lavalink_backend():
+    if existing_vc is not None and player is None:
         try:
-            await ensure_lavalink_ready()
+            await existing_vc.disconnect(force=True)
+        except Exception:
+            try:
+                await existing_vc.disconnect()
+            except Exception:
+                pass
+        player = None
 
-            existing_vc = ctx.voice_client
-            player = resolve_voice_client(ctx)
-
-            if existing_vc is not None and player is None:
-                try:
-                    await existing_vc.disconnect(force=True)
-                except Exception:
-                    try:
-                        await existing_vc.disconnect()
-                    except Exception:
-                        pass
-                player = None
-
-            if player is None:
-                player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-            elif player.channel != channel:
-                await player.move_to(channel)
-        except Exception as e:
-            if not MUSIC_AUTO_FALLBACK:
-                raise
-            print(f"[music-backend] lavalink 연결 실패 → direct 폴백: {e}", flush=True)
-            set_active_music_backend("direct", f"lavalink 연결 실패: {e}")
-            player = await _connect_direct_voice(ctx, channel)
-    else:
-        player = await _connect_direct_voice(ctx, channel)
+    if player is None:
+        player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+    elif player.channel != channel:
+        await player.move_to(channel)
 
     state = get_music_state(ctx.guild.id)
     state["last_voice_channel_id"] = channel.id
     state["last_text_channel_id"] = ctx.channel.id
     save_music_data()
     return player
-
-
-def _direct_after_play(guild_id: int, error):
-    try:
-        asyncio.run_coroutine_threadsafe(handle_direct_track_end(guild_id, error), bot.loop)
-    except Exception as e:
-        print(f"[direct] after callback 실패: {e}", flush=True)
-
-
-async def handle_direct_track_end(guild_id: int, error=None):
-    if error:
-        print(f"[direct] 재생 종료 콜백 오류: {error}", flush=True)
-
-    state = get_music_state(guild_id)
-    current = state.get("current")
-    if current:
-        if state.get("repeat"):
-            queue = get_guild_queue(guild_id)
-            queue.insert(0, make_queue_item(state.get("last_text_channel_id"), current["query"]))
-        else:
-            state["history"].append(current["query"])
-
-    state["current"] = None
-    save_music_data()
-
-    if error:
-        await send_music_message(guild_id, "⚠️ 재생 중 오류가 발생해서 다음 곡으로 넘어갈게")
-    await play_next(guild_id)
 
 
 async def search_lavalink_track(query: str):
@@ -1644,28 +1585,36 @@ async def play_next(guild_id: int):
                 await voice_client.disconnect()
             except Exception:
                 pass
-            await send_music_message(guild_id, "⚠️ Lavalink 대신 direct 재생으로 전환할게")
-            return await play_next(guild_id)
+            voice_channel = guild.get_channel(state.get("last_voice_channel_id")) if state.get("last_voice_channel_id") else None
+            if voice_channel is None:
+                voice_channel = getattr(getattr(guild, "voice_client", None), "channel", None)
+            if voice_channel is None and guild.me and getattr(guild.me, "voice", None):
+                voice_channel = guild.me.voice.channel
+            if voice_channel is None:
+                raise ValueError("direct 재생용 음성 채널을 찾지 못했어")
+            voice_client = await voice_channel.connect(self_deaf=False, self_mute=False)
 
-        voice_client.play(source, after=lambda err: _direct_after_play(guild_id, err))
+        def after_play(error):
+            try:
+                asyncio.run_coroutine_threadsafe(handle_direct_track_end(guild_id, error), bot.loop)
+            except Exception as callback_error:
+                print(f"[direct] after callback 실패: {callback_error}", flush=True)
 
-        search_hint = ""
+        voice_client.play(source, after=after_play)
+
+        searched_line = ""
         if attempted_queries and attempted_queries[0] != query:
-            search_hint = f"\n검색 보정: `{attempted_queries[0]}`"
+            searched_line = f"\n검색 보정: `{attempted_queries[0]}`"
 
         await send_music_message(
             guild_id,
-            f"🎵 재생 중: **{getattr(source, 'title', query) or query}**\n대기열: {len(queue)}곡\n백엔드: Direct{search_hint}",
+            f"🎵 재생 중: **{getattr(source, 'title', query) or query}**\n대기열: {len(queue)}곡\n백엔드: Direct{searched_line}",
             view=MusicView(guild_id)
         )
 
     except Exception as e:
         error_text = str(e)
         print(f"곡 재생 실패, 자동 스킵: {query} | {error_text}")
-
-        if use_lavalink_backend() and MUSIC_AUTO_FALLBACK:
-            print(f"[music-backend] 재생 실패 → direct 폴백: {error_text}", flush=True)
-            set_active_music_backend("direct", f"재생 실패: {error_text}")
 
         state["fail_count"] = state.get("fail_count", 0) + 1
         state["auto_skipped_count"] = state.get("auto_skipped_count", 0) + 1
@@ -1678,7 +1627,6 @@ async def play_next(guild_id: int):
             await play_next(guild_id)
         else:
             await send_music_message(guild_id, f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
-
 
 # =========================
 # 캘린더 이미지 생성
@@ -2706,8 +2654,20 @@ async def on_ready():
     print(f"로그인 완료: {bot.user}", flush=True)
 
     if not slash_sync_done:
-        slash_sync_done = True
-        print("슬래시 명령어 동기화는 setup_hook에서 글로벌 1회만 실행됨", flush=True)
+        try:
+            cleared = 0
+            for guild in bot.guilds:
+                try:
+                    bot.tree.clear_commands(guild=guild)
+                    await bot.tree.sync(guild=guild)
+                    cleared += 1
+                    print(f"길드 슬래시 명령어 정리 완료: {guild.name} ({guild.id})", flush=True)
+                except Exception as guild_error:
+                    print(f"길드 슬래시 명령어 정리 실패: {guild.name} ({guild.id}) / {guild_error}", flush=True)
+            slash_sync_done = True
+            print(f"슬래시 명령어는 setup_hook 글로벌 1회만 사용, 길드 중복 정리 완료: {cleared}개 길드", flush=True)
+        except Exception as e:
+            print(f"길드 슬래시 명령어 정리 실패: {e}", flush=True)
 
     try:
         load_schedule()
@@ -2819,6 +2779,31 @@ async def on_wavelink_track_end(payload):
     await play_next(guild_id)
 
 
+async def handle_direct_track_end(guild_id: int, error=None):
+    if error:
+        print(f"[direct] 재생 종료 콜백 오류: {error}", flush=True)
+
+    state = get_music_state(guild_id)
+    current = state.get("current")
+    if current:
+        if state.get("repeat"):
+            queue = get_guild_queue(guild_id)
+            queue.insert(0, make_queue_item(state.get("last_text_channel_id"), current["query"]))
+        else:
+            state["history"].append(current["query"])
+
+    state["current"] = None
+    save_music_data()
+
+    if error:
+        await send_music_message(guild_id, "⚠️ 재생 중 오류가 발생해서 다음 곡으로 넘어갈게")
+    await play_next(guild_id)
+
+
+def is_direct_voice_client(player) -> bool:
+    return player is not None and not isinstance(player, wavelink.Player)
+
+
 @bot.event
 async def on_wavelink_track_exception(payload):
     player = getattr(payload, "player", None)
@@ -2902,16 +2887,9 @@ async def join(ctx):
     channel = ctx.author.voice.channel
 
     try:
-        await try_restore_lavalink_backend()
         player = await get_or_connect_player(ctx)
-        backend_name = "Lavalink" if isinstance(player, wavelink.Player) else "Direct"
-        state = get_music_state(ctx.guild.id)
-        state["last_voice_channel_id"] = channel.id
-        state["last_text_channel_id"] = ctx.channel.id
-        save_music_data()
-
-        await ctx.send(f"✅ {channel.name} 입장 완료 ({backend_name})")
-
+        backend_label = "Lavalink" if isinstance(player, wavelink.Player) and use_lavalink_backend() else "Direct"
+        await ctx.send(f"✅ {channel.name} 입장 완료 (백엔드: {backend_label})")
     except Exception as e:
         await ctx.send(f"❌ 입장 실패: {e}")
 
@@ -3032,27 +3010,51 @@ async def stop(ctx):
 @bot.command(name="일시정지")
 async def pause(ctx):
     player = resolve_voice_client(ctx) or ctx.voice_client
-    if player and player_is_playing(player):
-        if isinstance(player, wavelink.Player):
-            await player.pause(True)
-        else:
-            player.pause()
-        await ctx.send("⏸️ 일시정지")
-    else:
+    if not player:
         await ctx.send("현재 재생 중인 노래가 없어")
+        return
+
+    if isinstance(player, wavelink.Player):
+        if player_is_playing(player):
+            await player.pause(True)
+            await ctx.send("⏸️ 일시정지")
+        else:
+            await ctx.send("현재 재생 중인 노래가 없어")
+        return
+
+    try:
+        if player.is_playing():
+            player.pause()
+            await ctx.send("⏸️ 일시정지")
+        else:
+            await ctx.send("현재 재생 중인 노래가 없어")
+    except Exception as e:
+        await ctx.send(f"❌ 일시정지 실패: {e}")
 
 
 @bot.command(name="다시재생")
 async def resume(ctx):
     player = resolve_voice_client(ctx) or ctx.voice_client
-    if player and player_is_paused(player):
-        if isinstance(player, wavelink.Player):
-            await player.pause(False)
-        else:
-            player.resume()
-        await ctx.send("▶️ 다시 재생")
-    else:
+    if not player:
         await ctx.send("일시정지된 노래가 없어")
+        return
+
+    if isinstance(player, wavelink.Player):
+        if player_is_paused(player):
+            await player.pause(False)
+            await ctx.send("▶️ 다시 재생")
+        else:
+            await ctx.send("일시정지된 노래가 없어")
+        return
+
+    try:
+        if player.is_paused():
+            player.resume()
+            await ctx.send("▶️ 다시 재생")
+        else:
+            await ctx.send("일시정지된 노래가 없어")
+    except Exception as e:
+        await ctx.send(f"❌ 다시재생 실패: {e}")
 
 
 @bot.command(name="노래리스트")
@@ -3228,6 +3230,116 @@ async def show_calendar(ctx, year: int = None, month: int = None):
 async def list_schedule(ctx):
     await send_schedule_list_message(ctx)
 
+
+class SlashContextAdapter:
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.guild = interaction.guild
+        self.channel = interaction.channel
+        self.voice_client = interaction.guild.voice_client if interaction.guild else None
+
+    async def send(self, content=None, **kwargs):
+        if not self.interaction.response.is_done():
+            await self.interaction.response.send_message(content, **kwargs)
+        else:
+            await self.interaction.followup.send(content, **kwargs)
+
+
+@bot.tree.command(name="입장", description="현재 들어가 있는 음성 채널에 입장합니다")
+async def slash_join(interaction: discord.Interaction):
+    await join(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="퇴장", description="음성 채널에서 퇴장합니다")
+async def slash_leave(interaction: discord.Interaction):
+    await leave(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="재생", description="노래 제목이나 유튜브 링크를 재생합니다")
+@app_commands.describe(query="노래 제목 또는 유튜브 링크")
+async def slash_play(interaction: discord.Interaction, query: str | None = None):
+    await play(SlashContextAdapter(interaction), query=query)
+
+
+@bot.tree.command(name="정지", description="현재 재생 중인 노래를 정지합니다")
+async def slash_stop(interaction: discord.Interaction):
+    await stop(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="일시정지", description="현재 재생 중인 노래를 일시정지합니다")
+async def slash_pause(interaction: discord.Interaction):
+    await pause(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="다시재생", description="일시정지한 노래를 다시 재생합니다")
+async def slash_resume(interaction: discord.Interaction):
+    await resume(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="노래리스트", description="현재 대기열을 보여줍니다")
+async def slash_queue_list(interaction: discord.Interaction):
+    await queue_list(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="플레이리스트정보", description="유튜브 플레이리스트 정보를 보여줍니다")
+@app_commands.describe(query="유튜브 플레이리스트 URL")
+async def slash_playlist_info(interaction: discord.Interaction, query: str):
+    await playlist_info(SlashContextAdapter(interaction), query=query)
+
+
+@bot.tree.command(name="가사", description="노래 가사를 보여줍니다")
+@app_commands.describe(song="가수 - 제목 형식 권장")
+async def slash_lyrics(interaction: discord.Interaction, song: str | None = None):
+    await lyrics(SlashContextAdapter(interaction), song=song)
+
+
+@bot.tree.command(name="도움말", description="노래와 일정 명령어 도움말을 보여줍니다")
+async def slash_help(interaction: discord.Interaction):
+    await help_command(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="쿠키상태", description="yt-dlp 쿠키 적용 상태를 보여줍니다")
+async def slash_cookie_status(interaction: discord.Interaction):
+    await cookie_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="우회상태", description="유튜브 우회 재생 상태를 보여줍니다")
+async def slash_bypass_status(interaction: discord.Interaction):
+    await bypass_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="음악상태", description="현재 음악 상태를 보여줍니다")
+async def slash_music_status(interaction: discord.Interaction):
+    await music_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="일정추가", description="간단한 일정 하나를 바로 추가합니다")
+@app_commands.describe(date="예: 2026-03-25", time_input="예: 18:00", text="일정 내용")
+async def slash_add_schedule(interaction: discord.Interaction, date: str, time_input: str, text: str):
+    await add_schedule_cmd(SlashContextAdapter(interaction), date, time_input, text=text)
+
+
+@bot.tree.command(name="일정삭제", description="등록된 일정을 삭제합니다")
+@app_commands.describe(index="삭제할 일정 번호")
+async def slash_delete_schedule(interaction: discord.Interaction, index: int):
+    await delete_schedule_cmd(SlashContextAdapter(interaction), index=index)
+
+
+@bot.tree.command(name="캘린더", description="캘린더를 표시합니다")
+@app_commands.describe(year="연도", month="월")
+async def slash_calendar(interaction: discord.Interaction, year: int | None = None, month: int | None = None):
+    await show_calendar(SlashContextAdapter(interaction), year=year, month=month)
+
+
+@bot.tree.command(name="일정목록", description="등록된 일정 목록을 보여줍니다")
+async def slash_schedule_list(interaction: discord.Interaction):
+    await list_schedule(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="재시동", description="봇을 재시동합니다")
+async def slash_restart(interaction: discord.Interaction):
+    await restart(SlashContextAdapter(interaction))
 
 
 # =========================
