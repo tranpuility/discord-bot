@@ -2599,24 +2599,8 @@ async def on_ready():
     print(f"로그인 완료: {bot.user}", flush=True)
 
     if not slash_sync_done:
-        try:
-            synced_global = await bot.tree.sync()
-            print(f"슬래시 명령어 글로벌 동기화 완료: {len(synced_global)}개", flush=True)
-
-            guild_sync_count = 0
-            for guild in bot.guilds:
-                try:
-                    bot.tree.copy_global_to(guild=guild)
-                    synced_guild = await bot.tree.sync(guild=guild)
-                    guild_sync_count += len(synced_guild)
-                    print(f"길드 슬래시 동기화 완료: {guild.name} ({guild.id}) / {len(synced_guild)}개", flush=True)
-                except Exception as guild_error:
-                    print(f"길드 슬래시 동기화 실패: {guild.name} ({guild.id}) / {guild_error}", flush=True)
-
-            slash_sync_done = True
-            print(f"슬래시 명령어 동기화 완료: 글로벌 {len(synced_global)}개, 길드 누적 {guild_sync_count}개", flush=True)
-        except Exception as e:
-            print(f"슬래시 명령어 동기화 실패: {e}", flush=True)
+        slash_sync_done = True
+        print("슬래시 명령어 동기화는 setup_hook에서 글로벌 1회만 실행됨", flush=True)
 
     try:
         load_schedule()
@@ -3144,6 +3128,117 @@ async def show_calendar(ctx, year: int = None, month: int = None):
 @bot.command(name="일정목록")
 async def list_schedule(ctx):
     await send_schedule_list_message(ctx)
+
+
+class SlashContextAdapter:
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.guild = interaction.guild
+        self.channel = interaction.channel
+        self.voice_client = interaction.guild.voice_client if interaction.guild else None
+
+    async def send(self, content=None, **kwargs):
+        if not self.interaction.response.is_done():
+            await self.interaction.response.send_message(content, **kwargs)
+        else:
+            await self.interaction.followup.send(content, **kwargs)
+
+
+@bot.tree.command(name="입장", description="현재 들어가 있는 음성 채널에 입장합니다")
+async def slash_join(interaction: discord.Interaction):
+    await join(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="퇴장", description="음성 채널에서 퇴장합니다")
+async def slash_leave(interaction: discord.Interaction):
+    await leave(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="재생", description="노래 제목이나 유튜브 링크를 재생합니다")
+@app_commands.describe(query="노래 제목 또는 유튜브 링크")
+async def slash_play(interaction: discord.Interaction, query: str | None = None):
+    await play(SlashContextAdapter(interaction), query=query)
+
+
+@bot.tree.command(name="정지", description="현재 재생 중인 노래를 정지합니다")
+async def slash_stop(interaction: discord.Interaction):
+    await stop(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="일시정지", description="현재 재생 중인 노래를 일시정지합니다")
+async def slash_pause(interaction: discord.Interaction):
+    await pause(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="다시재생", description="일시정지한 노래를 다시 재생합니다")
+async def slash_resume(interaction: discord.Interaction):
+    await resume(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="노래리스트", description="현재 대기열을 보여줍니다")
+async def slash_queue_list(interaction: discord.Interaction):
+    await queue_list(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="플레이리스트정보", description="유튜브 플레이리스트 정보를 보여줍니다")
+@app_commands.describe(query="유튜브 플레이리스트 URL")
+async def slash_playlist_info(interaction: discord.Interaction, query: str):
+    await playlist_info(SlashContextAdapter(interaction), query=query)
+
+
+@bot.tree.command(name="가사", description="노래 가사를 보여줍니다")
+@app_commands.describe(song="가수 - 제목 형식 권장")
+async def slash_lyrics(interaction: discord.Interaction, song: str | None = None):
+    await lyrics(SlashContextAdapter(interaction), song=song)
+
+
+@bot.tree.command(name="도움말", description="노래와 일정 명령어 도움말을 보여줍니다")
+async def slash_help(interaction: discord.Interaction):
+    await help_command(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="쿠키상태", description="yt-dlp 쿠키 적용 상태를 보여줍니다")
+async def slash_cookie_status(interaction: discord.Interaction):
+    await cookie_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="우회상태", description="유튜브 우회 재생 상태를 보여줍니다")
+async def slash_bypass_status(interaction: discord.Interaction):
+    await bypass_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="음악상태", description="현재 음악 상태를 보여줍니다")
+async def slash_music_status(interaction: discord.Interaction):
+    await music_status(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="일정추가", description="간단한 일정 하나를 바로 추가합니다")
+@app_commands.describe(date="예: 2026-03-25", time_input="예: 18:00", text="일정 내용")
+async def slash_add_schedule(interaction: discord.Interaction, date: str, time_input: str, text: str):
+    await add_schedule_cmd(SlashContextAdapter(interaction), date, time_input, text=text)
+
+
+@bot.tree.command(name="일정삭제", description="등록된 일정을 삭제합니다")
+@app_commands.describe(index="삭제할 일정 번호")
+async def slash_delete_schedule(interaction: discord.Interaction, index: int):
+    await delete_schedule_cmd(SlashContextAdapter(interaction), index=index)
+
+
+@bot.tree.command(name="캘린더", description="캘린더를 표시합니다")
+@app_commands.describe(year="연도", month="월")
+async def slash_calendar(interaction: discord.Interaction, year: int | None = None, month: int | None = None):
+    await show_calendar(SlashContextAdapter(interaction), year=year, month=month)
+
+
+@bot.tree.command(name="일정목록", description="등록된 일정 목록을 보여줍니다")
+async def slash_schedule_list(interaction: discord.Interaction):
+    await list_schedule(SlashContextAdapter(interaction))
+
+
+@bot.tree.command(name="재시동", description="봇을 재시동합니다")
+async def slash_restart(interaction: discord.Interaction):
+    await restart(SlashContextAdapter(interaction))
 
 
 # =========================
