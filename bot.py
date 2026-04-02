@@ -140,6 +140,32 @@ class SlashBot(commands.Bot):
 bot = SlashBot()
 
 
+def has_direct_voice_support() -> bool:
+    try:
+        import nacl  # type: ignore
+        return True
+    except Exception:
+        pass
+    try:
+        import davey  # type: ignore
+        return True
+    except Exception:
+        pass
+    return False
+
+
+async def wait_for_lavalink_player_ready(player, timeout: float = 8.0):
+    end_at = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < end_at:
+        try:
+            if getattr(player, "connected", False):
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.25)
+    return False
+
+
 def make_queue_item(channel_id: int | None, query: str):
     return (channel_id, query)
 
@@ -222,6 +248,9 @@ def player_is_paused(player) -> bool:
 
 
 async def _connect_direct_voice(ctx, channel):
+    if not has_direct_voice_support():
+        raise RuntimeError("free direct 음성 재생용 라이브러리(PyNaCl 또는 davey)가 서버에 없어")
+
     existing_vc = ctx.voice_client
     player = resolve_voice_client(ctx)
 
@@ -242,6 +271,9 @@ async def _connect_direct_voice(ctx, channel):
 
 
 async def reconnect_direct_voice_for_guild(guild_id: int):
+    if not has_direct_voice_support():
+        raise RuntimeError("free direct 음성 재생용 라이브러리(PyNaCl 또는 davey)가 서버에 없어")
+
     guild = bot.get_guild(guild_id)
     if guild is None:
         raise RuntimeError("길드 정보를 찾지 못했어")
@@ -295,6 +327,8 @@ async def get_or_connect_player(ctx):
                 player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
             elif player.channel != channel:
                 await player.move_to(channel)
+
+            await wait_for_lavalink_player_ready(player)
         except Exception as e:
             if not MUSIC_AUTO_FALLBACK:
                 raise
@@ -1597,7 +1631,7 @@ async def check_schedule():
 # 음악 재생
 # =========================
 async def verify_lavalink_playback_and_fallback(guild_id: int, query: str):
-    await asyncio.sleep(5)
+    await asyncio.sleep(8)
 
     guild = bot.get_guild(guild_id)
     if guild is None:
@@ -1613,20 +1647,25 @@ async def verify_lavalink_playback_and_fallback(guild_id: int, query: str):
         playing = False
 
     try:
-        position = int(getattr(player, "position", 0) or 0)
+        paused = player_is_paused(player)
     except Exception:
-        position = 0
+        paused = False
 
     try:
         connected = bool(getattr(player, "connected", True))
     except Exception:
         connected = True
 
-    if connected and playing and position > 0:
-        print(f"[music-backend] Lavalink 재생 확인 성공 | playing={playing} position={position}", flush=True)
+    # 일부 환경에서는 position 값이 계속 0으로 남으므로 position만으로 실패 판정하지 않음
+    if connected and playing and not paused:
+        print(f"[music-backend] Lavalink 재생 상태 유지 | playing={playing} paused={paused}", flush=True)
         return
 
-    print(f"[music-backend] Lavalink 재생 확인 실패 -> direct 폴백 | playing={playing} position={position}", flush=True)
+    print(f"[music-backend] Lavalink 재생 확인 실패 -> direct 폴백 시도 | playing={playing} paused={paused}", flush=True)
+
+    if not has_direct_voice_support():
+        await send_music_message(guild_id, "⚠️ 무료 direct 음성 폴백에 필요한 음성 라이브러리가 서버에 없어서 Lavalink만 유지할게")
+        return
 
     state = get_music_state(guild_id)
     queue = get_guild_queue(guild_id)
