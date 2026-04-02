@@ -114,40 +114,6 @@ async def try_restore_lavalink_backend():
         print(f"[music-backend] lavalink 복구 실패: {e}", flush=True)
         return False
 
-
-AUDIO_URL_EXTENSIONS = (".mp3", ".m4a", ".aac", ".wav", ".ogg", ".oga", ".flac", ".webm", ".opus")
-
-
-def has_lavalink_config() -> bool:
-    return bool(os.getenv("LAVALINK_HOST")) and bool(os.getenv("LAVALINK_PASSWORD"))
-
-
-def is_youtube_like_query(query: str) -> bool:
-    q = (query or "").strip().lower()
-    if not q:
-        return False
-    if "youtube.com" in q or "youtu.be" in q or q.startswith("ytsearch:") or q.startswith("ytmsearch:"):
-        return True
-    if not q.startswith(("http://", "https://")):
-        return True
-    return False
-
-
-def is_direct_safe_query(query: str) -> bool:
-    q = (query or "").strip().lower()
-    if not q.startswith(("http://", "https://")):
-        return False
-    if "youtube.com" in q or "youtu.be" in q:
-        return False
-    path = urlparse(q).path.lower()
-    return path.endswith(AUDIO_URL_EXTENSIONS)
-
-
-def get_degraded_mode_message(query: str) -> str:
-    if is_youtube_like_query(query):
-        return "⚠️ 현재 무료 비상모드라 유튜브 검색/재생은 막혀 있어. Lavalink 서버가 살아있을 때만 유튜브 재생이 가능해."
-    return "⚠️ 현재 무료 비상모드에서는 직접 오디오 파일 링크만 재생할 수 있어."
-
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "onglefont.ttf")
@@ -1188,6 +1154,27 @@ def is_youtube_playlist_url(query: str) -> bool:
     return False
 
 
+def is_direct_audio_url(query: str) -> bool:
+    try:
+        parsed = urlparse((query or '').strip())
+    except Exception:
+        return False
+    if parsed.scheme not in ('http', 'https'):
+        return False
+    path = (parsed.path or '').lower()
+    return path.endswith(('.mp3', '.m4a', '.aac', '.wav', '.ogg', '.flac', '.opus'))
+
+
+def is_youtube_or_search_query(query: str) -> bool:
+    q = (query or '').strip().lower()
+    if not q:
+        return False
+    if 'youtube.com' in q or 'youtu.be' in q or q.startswith('ytsearch:') or q.startswith('ytmsearch:'):
+        return True
+    # direct 모드에서 일반 검색어는 유튜브 검색으로 간주
+    return not q.startswith(('http://', 'https://'))
+
+
 async def extract_playlist_entries(query: str):
     loop = asyncio.get_running_loop()
 
@@ -1806,19 +1793,16 @@ async def play_next(guild_id: int):
             )
             return
 
-        if not is_direct_safe_query(query):
-            state["current"] = None
-            state["last_query"] = query
-            save_music_data()
-            msg = get_degraded_mode_message(query)
-            if queue:
-                await send_music_message(guild_id, f"{msg}
-다음 곡으로 넘어갈게.")
-                await asyncio.sleep(1)
-                await play_next(guild_id)
-            else:
-                await send_music_message(guild_id, msg)
-            return
+        if not use_lavalink_backend():
+            if is_youtube_or_search_query(query) and not is_direct_audio_url(query):
+                state["current"] = None
+                save_music_data()
+                await send_music_message(
+                    guild_id,
+                    "⚠️ 지금은 무료 비상모드라 유튜브 검색/링크 재생은 잠깐 막혀 있어. Lavalink가 다시 살아나면 자동 복귀할게.",
+                    view=MusicView(guild_id)
+                )
+                return
 
         source, attempted_queries = await try_resolve_player_with_fallback(query)
 
@@ -3114,7 +3098,7 @@ async def join(ctx):
     try:
         await try_restore_lavalink_backend()
         player = await get_or_connect_player(ctx)
-        backend_name = "Lavalink" if isinstance(player, wavelink.Player) and use_lavalink_backend() else "Direct"
+        backend_name = "Lavalink" if isinstance(player, wavelink.Player) else "Direct"
         state = get_music_state(ctx.guild.id)
         state["last_voice_channel_id"] = channel.id
         state["last_text_channel_id"] = ctx.channel.id
@@ -3178,6 +3162,9 @@ async def play(ctx, *, query: str = None):
         state["restored_queue"] = []
 
     if is_youtube_playlist_url(query):
+        if not use_lavalink_backend():
+            await ctx.send("⚠️ 지금은 무료 비상모드라 유튜브 플레이리스트 재생은 잠깐 막혀 있어. Lavalink가 살아나면 다시 가능해.")
+            return
         try:
             playlist_entries = await extract_playlist_entries(query)
         except Exception as e:
