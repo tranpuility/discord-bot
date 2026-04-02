@@ -1596,6 +1596,54 @@ async def check_schedule():
 # =========================
 # 음악 재생
 # =========================
+async def verify_lavalink_playback_and_fallback(guild_id: int, query: str):
+    await asyncio.sleep(5)
+
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+
+    player = guild.voice_client if isinstance(guild.voice_client, wavelink.Player) else None
+    if player is None or not use_lavalink_backend():
+        return
+
+    try:
+        playing = player_is_playing(player)
+    except Exception:
+        playing = False
+
+    try:
+        position = int(getattr(player, "position", 0) or 0)
+    except Exception:
+        position = 0
+
+    try:
+        connected = bool(getattr(player, "connected", True))
+    except Exception:
+        connected = True
+
+    if connected and playing and position > 0:
+        print(f"[music-backend] Lavalink 재생 확인 성공 | playing={playing} position={position}", flush=True)
+        return
+
+    print(f"[music-backend] Lavalink 재생 확인 실패 -> direct 폴백 | playing={playing} position={position}", flush=True)
+
+    state = get_music_state(guild_id)
+    queue = get_guild_queue(guild_id)
+    queue.insert(0, make_queue_item(state.get("last_text_channel_id"), query))
+    state["current"] = None
+    save_music_data()
+
+    try:
+        await player.disconnect()
+    except Exception as e:
+        print(f"[music-backend] lavalink disconnect 실패: {e}", flush=True)
+
+    set_active_music_backend("direct", "lavalink 무음/미재생 폴백")
+    await send_music_message(guild_id, "⚠️ Lavalink 재생 확인이 안 돼서 Direct로 자동 전환할게")
+    await play_next(guild_id)
+
+
 async def play_next(guild_id: int):
     queue = get_guild_queue(guild_id)
     state = get_music_state(guild_id)
@@ -1649,6 +1697,14 @@ async def play_next(guild_id: int):
             save_music_data()
 
             await voice_client.play(track)
+            try:
+                set_volume = getattr(voice_client, "set_volume", None)
+                if callable(set_volume):
+                    await set_volume(100)
+            except Exception as e:
+                print(f"[music-backend] 재생 후 lavalink 볼륨 설정 실패: {e}", flush=True)
+
+            bot.loop.create_task(verify_lavalink_playback_and_fallback(guild_id, query))
 
             extra_line = ""
             if matched_query != query:
@@ -2765,7 +2821,15 @@ async def on_ready():
         print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}")
         print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
 
-        await ensure_lavalink_ready()
+        try:
+            await ensure_lavalink_ready()
+            print("[music-backend] on_ready lavalink 준비 완료", flush=True)
+        except Exception as e:
+            if MUSIC_AUTO_FALLBACK:
+                set_active_music_backend("direct", f"on_ready lavalink 실패: {e}")
+                print(f"[music-backend] on_ready lavalink 실패 → direct 대기: {e}", flush=True)
+            else:
+                raise
 
         if os.path.exists(RESTART_FILE):
             try:
