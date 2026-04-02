@@ -328,7 +328,16 @@ async def get_or_connect_player(ctx):
             elif player.channel != channel:
                 await player.move_to(channel)
 
-            await wait_for_lavalink_player_ready(player)
+            ready = await wait_for_lavalink_player_ready(player, timeout=15.0)
+            if not ready:
+                raise RuntimeError("Lavalink 플레이어 연결 준비가 지연되고 있어")
+            try:
+                set_volume = getattr(player, "set_volume", None)
+                if callable(set_volume):
+                    await set_volume(150)
+            except Exception as e:
+                print(f"[music-backend] 입장 후 lavalink 볼륨 설정 실패: {e}", flush=True)
+            await asyncio.sleep(1.0)
         except Exception as e:
             if not MUSIC_AUTO_FALLBACK:
                 raise
@@ -1661,6 +1670,12 @@ async def verify_lavalink_playback_and_fallback(guild_id: int, query: str):
         print(f"[music-backend] Lavalink 재생 상태 유지 | playing={playing} paused={paused}", flush=True)
         return
 
+    # Direct 재생 지원이 없으면 Lavalink를 유지하고 끊지 않음
+    if not has_direct_voice_support():
+        print("[music-backend] direct 폴백 불가(PyNaCl/davey 없음) -> lavalink 유지", flush=True)
+        await send_music_message(guild_id, "⚠️ 무료 direct 음성 라이브러리(PyNaCl)가 없어 Lavalink만 유지할게")
+        return
+
     print(f"[music-backend] Lavalink 재생 확인 실패 -> direct 폴백 시도 | playing={playing} paused={paused}", flush=True)
 
     if not has_direct_voice_support():
@@ -1736,10 +1751,11 @@ async def play_next(guild_id: int):
             save_music_data()
 
             await voice_client.play(track)
+            await asyncio.sleep(1.0)
             try:
                 set_volume = getattr(voice_client, "set_volume", None)
                 if callable(set_volume):
-                    await set_volume(100)
+                    await set_volume(150)
             except Exception as e:
                 print(f"[music-backend] 재생 후 lavalink 볼륨 설정 실패: {e}", flush=True)
 

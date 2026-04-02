@@ -1,8 +1,8 @@
-discord.py
-wavelink>=3.4,<4
-yt-dlp
-PyNaCl
-python-dotenv
-aiohttp
-Pillow
-korean-lunar-calendar
+discord.py>=2.4.0
+PyNaCl>=1.5.0
+python-dotenv>=1.0.1
+aiohttp>=3.9.5
+yt-dlp>=2025.3.31
+wavelink>=3.4.1
+Pillow>=10.4.0
+korean-lunar-calendar>=0.3.1
