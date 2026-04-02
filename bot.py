@@ -99,21 +99,24 @@ async def try_restore_lavalink_backend():
 
     LAST_LAVALINK_RETRY_AT = now
     try:
-        await ensure_lavalink_ready()
+        try:
+            await ensure_lavalink_ready()
+            set_active_music_backend("lavalink", "on_ready 연결 성공")
+        except Exception as e:
+            if MUSIC_AUTO_FALLBACK:
+                set_active_music_backend("direct", f"on_ready lavalink 실패: {e}")
+                print(f"[music-backend] on_ready lavalink 실패 → direct 사용: {e}", flush=True)
+            else:
+                raise
         set_active_music_backend("lavalink", "노드 복구 감지")
         return True
     except Exception as e:
-        if MUSIC_AUTO_FALLBACK:
-            set_active_music_backend("direct", f"lavalink 복구 실패: {e}")
-            print(f"[music-backend] lavalink 복구 실패 → direct 유지: {e}", flush=True)
-            return False
         print(f"[music-backend] lavalink 복구 실패: {e}", flush=True)
         return False
 
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "onglefont.ttf")
-FONT_LOGGED = False
 
 # =========================
 # 기본 설정
@@ -238,6 +241,33 @@ async def _connect_direct_voice(ctx, channel):
     return voice_client
 
 
+async def reconnect_direct_voice_for_guild(guild_id: int):
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        raise RuntimeError("길드 정보를 찾지 못했어")
+
+    state = get_music_state(guild_id)
+    channel_id = state.get("last_voice_channel_id")
+    if not channel_id:
+        raise RuntimeError("마지막 음성 채널 정보가 없어")
+
+    channel = bot.get_channel(channel_id) or guild.get_channel(channel_id)
+    if channel is None:
+        raise RuntimeError("음성 채널을 찾지 못했어")
+
+    existing_vc = guild.voice_client
+    if existing_vc is not None:
+        try:
+            await existing_vc.disconnect(force=True)
+        except Exception:
+            try:
+                await existing_vc.disconnect()
+            except Exception:
+                pass
+
+    return await channel.connect(self_deaf=False, self_mute=False)
+
+
 async def get_or_connect_player(ctx):
     if ctx.author.voice is None or ctx.author.voice.channel is None:
         raise ValueError("음성 채널 먼저 들어가줘")
@@ -265,13 +295,6 @@ async def get_or_connect_player(ctx):
                 player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
             elif player.channel != channel:
                 await player.move_to(channel)
-
-            try:
-                set_volume = getattr(player, "set_volume", None)
-                if callable(set_volume):
-                    await set_volume(100)
-            except Exception as e:
-                print(f"[music-backend] lavalink 볼륨 설정 실패: {e}", flush=True)
         except Exception as e:
             if not MUSIC_AUTO_FALLBACK:
                 raise
@@ -1371,28 +1394,34 @@ def load_music_data():
 # =========================
 def resolve_font_path():
     candidates = [
-        FONT_FILE,
+        os.path.join(BASE_DIR, "onglefont.ttf"),
+        os.path.join(BASE_DIR, "온글잎 박다현체.ttf"),
+        os.path.join(DATA_DIR, "onglefont.ttf"),
+        os.path.join(DATA_DIR, "온글잎 박다현체.ttf"),
         "/app/onglefont.ttf",
+        "/app/온글잎 박다현체.ttf",
     ]
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
             return candidate
+    try:
+        for name in os.listdir(BASE_DIR):
+            if name.lower().endswith(".ttf"):
+                return os.path.join(BASE_DIR, name)
+    except Exception:
+        pass
     return None
 
 
 def get_font(size: int):
-    global FONT_LOGGED
     font_path = resolve_font_path()
     if font_path:
         try:
-            if not FONT_LOGGED:
-                print(f"적용 폰트: {font_path}", flush=True)
-                FONT_LOGGED = True
             return ImageFont.truetype(font_path, size)
         except Exception as e:
-            print(f"[폰트 오류] {e} | path={font_path}", flush=True)
+            print(f"[폰트 오류] {e} | path={font_path}")
     else:
-        print("[폰트 오류] onglefont.ttf 파일을 찾지 못함", flush=True)
+        print("[폰트 오류] 온글잎 박다현체.ttf 파일을 찾지 못함")
     return ImageFont.load_default()
 
 def safe_text(text: str, limit: int):
@@ -1567,49 +1596,6 @@ async def check_schedule():
 # =========================
 # 음악 재생
 # =========================
-async def verify_lavalink_playback_and_fallback(guild_id: int, query: str):
-    await asyncio.sleep(3)
-
-    guild = bot.get_guild(guild_id)
-    if guild is None:
-        return
-
-    player = guild.voice_client if isinstance(guild.voice_client, wavelink.Player) else None
-    if player is None or not use_lavalink_backend():
-        return
-
-    try:
-        playing = player_is_playing(player)
-    except Exception:
-        playing = False
-
-    position = 0
-    try:
-        position = int(getattr(player, "position", 0) or 0)
-    except Exception:
-        position = 0
-
-    if playing and position > 0:
-        return
-
-    print(f"[music-backend] Lavalink 재생 확인 실패 -> direct 폴백 | playing={playing} position={position}", flush=True)
-
-    state = get_music_state(guild_id)
-    queue = get_guild_queue(guild_id)
-    queue.insert(0, make_queue_item(state.get("last_text_channel_id"), query))
-    state["current"] = None
-    save_music_data()
-
-    try:
-        await player.disconnect()
-    except Exception as e:
-        print(f"[music-backend] lavalink disconnect 실패: {e}", flush=True)
-
-    set_active_music_backend("direct", "lavalink 무음/미재생 폴백")
-    await send_music_message(guild_id, "⚠️ Lavalink 재생 확인이 안 돼서 Direct로 자동 전환할게")
-    await play_next(guild_id)
-
-
 async def play_next(guild_id: int):
     queue = get_guild_queue(guild_id)
     state = get_music_state(guild_id)
@@ -1630,6 +1616,15 @@ async def play_next(guild_id: int):
     channel_id, query = unpack_queue_item(queue.pop(0))
     if channel_id:
         state["last_text_channel_id"] = channel_id
+
+    if voice_client is None and not use_lavalink_backend():
+        try:
+            voice_client = await reconnect_direct_voice_for_guild(guild_id)
+        except Exception as e:
+            state["current"] = None
+            save_music_data()
+            await send_music_message(guild_id, f"❌ Direct 재연결 실패: {e}")
+            return
 
     if voice_client is None:
         state["current"] = None
@@ -1654,12 +1649,6 @@ async def play_next(guild_id: int):
             save_music_data()
 
             await voice_client.play(track)
-            try:
-                set_volume = getattr(voice_client, "set_volume", None)
-                if callable(set_volume):
-                    await set_volume(100)
-            except Exception as e:
-                print(f"[music-backend] 재생 후 lavalink 볼륨 설정 실패: {e}", flush=True)
 
             extra_line = ""
             if matched_query != query:
@@ -1670,7 +1659,6 @@ async def play_next(guild_id: int):
                 f"🎵 재생 중: **{getattr(track, 'title', query)}**\n대기열: {len(queue)}곡\n백엔드: Lavalink{extra_line}",
                 view=MusicView(guild_id)
             )
-            asyncio.create_task(verify_lavalink_playback_and_fallback(guild_id, query))
             return
 
         source, attempted_queries = await try_resolve_player_with_fallback(query)
@@ -1692,10 +1680,17 @@ async def play_next(guild_id: int):
                 await voice_client.disconnect()
             except Exception:
                 pass
+            voice_client = await reconnect_direct_voice_for_guild(guild_id)
             await send_music_message(guild_id, "⚠️ Lavalink 대신 direct 재생으로 전환할게")
-            return await play_next(guild_id)
+
+        if hasattr(voice_client, "is_playing") and voice_client.is_playing():
+            try:
+                voice_client.stop()
+            except Exception:
+                pass
 
         voice_client.play(source, after=lambda err: _direct_after_play(guild_id, err))
+        print(f"[music-backend] direct 재생 시작 | query={query}", flush=True)
 
         search_hint = ""
         if attempted_queries and attempted_queries[0] != query:
@@ -2766,34 +2761,11 @@ async def on_ready():
         if cookie_file:
             print(f"yt-dlp cookies 적용됨: {cookie_file}")
         else:
-            print("yt-dlp cookies 미적용: 쿠키 없이 우회 모드로 시도할게", flush=True)
-        print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}", flush=True)
-        print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}", flush=True)
+            print("yt-dlp cookies 미적용: 쿠키 없이 우회 모드로 시도할게")
+        print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}")
+        print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}")
 
-        if MUSIC_BACKEND == "lavalink":
-            try:
-                await ensure_lavalink_ready()
-                set_active_music_backend("lavalink", "on_ready 연결 성공")
-            except Exception as e:
-                if MUSIC_AUTO_FALLBACK:
-                    set_active_music_backend("direct", f"on_ready lavalink 실패: {e}")
-                    print(f"[music-backend] on_ready lavalink 실패 → direct 사용: {e}", flush=True)
-                else:
-                    print(f"[music-backend] on_ready lavalink 실패: {e}", flush=True)
-        else:
-            set_active_music_backend("direct", "기본 direct 모드",)
-
-        # 예전에 남아 있던 길드 전용 슬래시 명령어 제거
-        cleared = 0
-        for guild in bot.guilds:
-            try:
-                bot.tree.clear_commands(guild=guild)
-                await bot.tree.sync(guild=guild)
-                cleared += 1
-            except Exception as e:
-                print(f"[slash-cleanup] {guild.name} 길드 명령어 정리 실패: {e}", flush=True)
-        if cleared:
-            print(f"기존 길드 슬래시 명령어 정리 완료: {cleared}개 길드", flush=True)
+        await ensure_lavalink_ready()
 
         if os.path.exists(RESTART_FILE):
             try:
@@ -2832,35 +2804,24 @@ async def on_ready():
                             voice_channel = bot.get_channel(voice_channel_id)
                             if voice_channel and getattr(voice_channel, "connect", None):
                                 try:
-                                    if use_lavalink_backend():
-                                        if guild.voice_client is None:
-                                            await voice_channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-                                        else:
-                                            player = guild.voice_client
-                                            if isinstance(player, wavelink.Player):
-                                                await player.move_to(voice_channel)
-                                            else:
-                                                await guild.voice_client.disconnect()
-                                                await voice_channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+                                    if guild.voice_client is None:
+                                        await voice_channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
                                     else:
-                                        if guild.voice_client is None:
-                                            await voice_channel.connect(self_deaf=False, self_mute=False)
+                                        player = guild.voice_client
+                                        if isinstance(player, wavelink.Player):
+                                            await player.move_to(voice_channel)
                                         else:
-                                            if isinstance(guild.voice_client, wavelink.Player):
-                                                await guild.voice_client.disconnect()
-                                                await voice_channel.connect(self_deaf=False, self_mute=False)
-                                            else:
-                                                await guild.voice_client.move_to(voice_channel)
+                                            await guild.voice_client.move_to(voice_channel)
                                     state["last_voice_channel_id"] = voice_channel_id
                                 except Exception as e:
-                                    print(f"자동 재입장 실패: {e}", flush=True)
+                                    print(f"자동 재입장 실패: {e}")
 
                 if os.path.exists(RESTART_PROCESSING_FILE):
                     os.remove(RESTART_PROCESSING_FILE)
             except FileNotFoundError:
                 pass
             except Exception as e:
-                print(f"재시동 완료 처리 실패: {e}", flush=True)
+                print(f"재시동 완료 처리 실패: {e}")
                 if os.path.exists(RESTART_PROCESSING_FILE):
                     os.remove(RESTART_PROCESSING_FILE)
 
@@ -2869,7 +2830,7 @@ async def on_ready():
             schedule_task_started = True
 
     except Exception as e:
-        print(f"초기화 오류: {e}", flush=True)
+        print(f"초기화 오류: {e}")
 
 
 @bot.event
@@ -2986,13 +2947,6 @@ async def join(ctx):
     try:
         await try_restore_lavalink_backend()
         player = await get_or_connect_player(ctx)
-        if isinstance(player, wavelink.Player):
-            try:
-                set_volume = getattr(player, "set_volume", None)
-                if callable(set_volume):
-                    await set_volume(100)
-            except Exception as e:
-                print(f"[music-backend] 입장 후 lavalink 볼륨 설정 실패: {e}", flush=True)
         backend_name = "Lavalink" if isinstance(player, wavelink.Player) else "Direct"
         state = get_music_state(ctx.guild.id)
         state["last_voice_channel_id"] = channel.id
