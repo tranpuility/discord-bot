@@ -46,11 +46,11 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
-YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
-YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "false").lower() in ("1", "true", "yes", "on")
+YTDLP_COOKIE_FILE = None  # 쿠키 파일 강제 비활성화
+YTDLP_USE_COOKIES = False  # 쿠키 강제 비활성화
 YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true", "yes", "on")
 YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
+YTDLP_DISABLE_WEB_CLIENT = True  # web/mweb 클라이언트 강제 비활성화
 
 
 # =========================
@@ -135,6 +135,8 @@ class SlashBot(commands.Bot):
             print(f"[setup_hook] 글로벌 슬래시 동기화 실패: {e}", flush=True)
 
 bot = SlashBot()
+print("yt-dlp cookies 강제 비활성화", flush=True)
+print("yt-dlp web/mweb 클라이언트 강제 비활성화", flush=True)
 
 
 def make_queue_item(channel_id: int | None, query: str):
@@ -931,7 +933,7 @@ YTDL_OPTIONS = {
     },
     "extractor_args": {
         "youtube": {
-            "player_client": ["android"] if not YTDLP_USE_COOKIES else (["android", "ios", "mweb"] if YTDLP_DISABLE_WEB_CLIENT else ["android", "ios", "mweb", "web_creator", "web"]),
+            "player_client": ["android"],
             "player_skip": ["webpage", "configs"]
         }
     },
@@ -944,9 +946,7 @@ if YTDLP_FORCE_IPV4:
 def create_ytdl():
 
     options = dict(YTDL_OPTIONS)
-    cookie_file = resolve_cookie_file()
-    if cookie_file:
-        options["cookiefile"] = cookie_file
+    # 쿠키 사용 안 함
     return yt_dlp.YoutubeDL(options)
 
 
