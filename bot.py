@@ -310,8 +310,8 @@ async def get_or_connect_player(ctx):
         try:
             await ensure_lavalink_ready()
 
-            existing_vc = ctx.voice_client
-            player = resolve_voice_client(ctx)
+            existing_vc = ctx.guild.voice_client
+            player = existing_vc if isinstance(existing_vc, wavelink.Player) else None
 
             if existing_vc is not None and player is None:
                 try:
@@ -321,14 +321,30 @@ async def get_or_connect_player(ctx):
                         await existing_vc.disconnect()
                     except Exception:
                         pass
+                await asyncio.sleep(1.5)
+                player = None
+
+            if player is not None and getattr(player, "channel", None) != channel:
+                try:
+                    await player.disconnect(force=True)
+                except Exception:
+                    try:
+                        await player.disconnect()
+                    except Exception:
+                        pass
+                await asyncio.sleep(1.5)
                 player = None
 
             if player is None:
-                player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-            elif player.channel != channel:
-                await player.move_to(channel)
+                player = await asyncio.wait_for(
+                    channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False),
+                    timeout=45
+                )
+                print(f"[music-backend] lavalink voice join 성공: guild={ctx.guild.id} channel={channel.id}", flush=True)
+            else:
+                print(f"[music-backend] lavalink voice 재사용: guild={ctx.guild.id} channel={channel.id}", flush=True)
 
-            ready = await wait_for_lavalink_player_ready(player, timeout=15.0)
+            ready = await wait_for_lavalink_player_ready(player, timeout=20.0)
             if not ready:
                 raise RuntimeError("Lavalink 플레이어 연결 준비가 지연되고 있어")
             try:
