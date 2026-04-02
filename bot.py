@@ -56,7 +56,7 @@ YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower(
 # =========================
 # 음악 백엔드 설정
 # =========================
-MUSIC_BACKEND = (os.getenv("MUSIC_BACKEND") or "direct").strip().lower()
+MUSIC_BACKEND = "direct"  # Railway 환경변수보다 direct 강제 우선
 MUSIC_AUTO_FALLBACK = os.getenv("MUSIC_AUTO_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
 MUSIC_AUTO_RESTORE_LAVALINK = os.getenv("MUSIC_AUTO_RESTORE_LAVALINK", "true").lower() in ("1", "true", "yes", "on")
 ACTIVE_MUSIC_BACKEND = MUSIC_BACKEND
