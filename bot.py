@@ -113,6 +113,7 @@ async def try_restore_lavalink_backend():
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "onglefont.ttf")
+FONT_LOGGED = False
 
 # =========================
 # 기본 설정
@@ -230,7 +231,7 @@ async def _connect_direct_voice(ctx, channel):
 
     voice_client = existing_vc
     if voice_client is None:
-        voice_client = await channel.connect(self_deaf=False, self_mute=False)
+        voice_client = await channel.connect(self_deaf=True, self_mute=False)
     elif getattr(voice_client, "channel", None) != channel:
         await voice_client.move_to(channel)
 
@@ -261,9 +262,16 @@ async def get_or_connect_player(ctx):
                 player = None
 
             if player is None:
-                player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+                player = await channel.connect(cls=wavelink.Player, self_deaf=True, self_mute=False)
             elif player.channel != channel:
                 await player.move_to(channel)
+
+            try:
+                set_volume = getattr(player, "set_volume", None)
+                if callable(set_volume):
+                    await set_volume(100)
+            except Exception as e:
+                print(f"[music-backend] lavalink 볼륨 설정 실패: {e}", flush=True)
         except Exception as e:
             if not MUSIC_AUTO_FALLBACK:
                 raise
@@ -1363,34 +1371,30 @@ def load_music_data():
 # =========================
 def resolve_font_path():
     candidates = [
+        FONT_FILE,
         os.path.join(BASE_DIR, "onglefont.ttf"),
-        os.path.join(BASE_DIR, "온글잎 박다현체.ttf"),
         os.path.join(DATA_DIR, "onglefont.ttf"),
-        os.path.join(DATA_DIR, "온글잎 박다현체.ttf"),
         "/app/onglefont.ttf",
-        "/app/온글잎 박다현체.ttf",
     ]
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
             return candidate
-    try:
-        for name in os.listdir(BASE_DIR):
-            if name.lower().endswith(".ttf"):
-                return os.path.join(BASE_DIR, name)
-    except Exception:
-        pass
     return None
 
 
 def get_font(size: int):
+    global FONT_LOGGED
     font_path = resolve_font_path()
     if font_path:
         try:
+            if not FONT_LOGGED:
+                print(f"적용 폰트: {font_path}", flush=True)
+                FONT_LOGGED = True
             return ImageFont.truetype(font_path, size)
         except Exception as e:
-            print(f"[폰트 오류] {e} | path={font_path}")
+            print(f"[폰트 오류] {e} | path={font_path}", flush=True)
     else:
-        print("[폰트 오류] 온글잎 박다현체.ttf 파일을 찾지 못함")
+        print("[폰트 오류] onglefont.ttf 파일을 찾지 못함", flush=True)
     return ImageFont.load_default()
 
 def safe_text(text: str, limit: int):
@@ -1609,6 +1613,12 @@ async def play_next(guild_id: int):
             save_music_data()
 
             await voice_client.play(track)
+            try:
+                set_volume = getattr(voice_client, "set_volume", None)
+                if callable(set_volume):
+                    await set_volume(100)
+            except Exception as e:
+                print(f"[music-backend] 재생 후 lavalink 볼륨 설정 실패: {e}", flush=True)
 
             extra_line = ""
             if matched_query != query:
@@ -2934,6 +2944,13 @@ async def join(ctx):
     try:
         await try_restore_lavalink_backend()
         player = await get_or_connect_player(ctx)
+        if isinstance(player, wavelink.Player):
+            try:
+                set_volume = getattr(player, "set_volume", None)
+                if callable(set_volume):
+                    await set_volume(100)
+            except Exception as e:
+                print(f"[music-backend] 입장 후 lavalink 볼륨 설정 실패: {e}", flush=True)
         backend_name = "Lavalink" if isinstance(player, wavelink.Player) else "Direct"
         state = get_music_state(ctx.guild.id)
         state["last_voice_channel_id"] = channel.id
