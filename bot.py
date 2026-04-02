@@ -231,7 +231,7 @@ async def _connect_direct_voice(ctx, channel):
 
     voice_client = existing_vc
     if voice_client is None:
-        voice_client = await channel.connect(self_deaf=True, self_mute=False)
+        voice_client = await channel.connect(self_deaf=False, self_mute=False)
     elif getattr(voice_client, "channel", None) != channel:
         await voice_client.move_to(channel)
 
@@ -262,7 +262,7 @@ async def get_or_connect_player(ctx):
                 player = None
 
             if player is None:
-                player = await channel.connect(cls=wavelink.Player, self_deaf=True, self_mute=False)
+                player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
             elif player.channel != channel:
                 await player.move_to(channel)
 
@@ -1372,8 +1372,6 @@ def load_music_data():
 def resolve_font_path():
     candidates = [
         FONT_FILE,
-        os.path.join(BASE_DIR, "onglefont.ttf"),
-        os.path.join(DATA_DIR, "onglefont.ttf"),
         "/app/onglefont.ttf",
     ]
     for candidate in candidates:
@@ -1569,6 +1567,49 @@ async def check_schedule():
 # =========================
 # 음악 재생
 # =========================
+async def verify_lavalink_playback_and_fallback(guild_id: int, query: str):
+    await asyncio.sleep(3)
+
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+
+    player = guild.voice_client if isinstance(guild.voice_client, wavelink.Player) else None
+    if player is None or not use_lavalink_backend():
+        return
+
+    try:
+        playing = player_is_playing(player)
+    except Exception:
+        playing = False
+
+    position = 0
+    try:
+        position = int(getattr(player, "position", 0) or 0)
+    except Exception:
+        position = 0
+
+    if playing and position > 0:
+        return
+
+    print(f"[music-backend] Lavalink 재생 확인 실패 -> direct 폴백 | playing={playing} position={position}", flush=True)
+
+    state = get_music_state(guild_id)
+    queue = get_guild_queue(guild_id)
+    queue.insert(0, make_queue_item(state.get("last_text_channel_id"), query))
+    state["current"] = None
+    save_music_data()
+
+    try:
+        await player.disconnect()
+    except Exception as e:
+        print(f"[music-backend] lavalink disconnect 실패: {e}", flush=True)
+
+    set_active_music_backend("direct", "lavalink 무음/미재생 폴백")
+    await send_music_message(guild_id, "⚠️ Lavalink 재생 확인이 안 돼서 Direct로 자동 전환할게")
+    await play_next(guild_id)
+
+
 async def play_next(guild_id: int):
     queue = get_guild_queue(guild_id)
     state = get_music_state(guild_id)
@@ -1629,6 +1670,7 @@ async def play_next(guild_id: int):
                 f"🎵 재생 중: **{getattr(track, 'title', query)}**\n대기열: {len(queue)}곡\n백엔드: Lavalink{extra_line}",
                 view=MusicView(guild_id)
             )
+            asyncio.create_task(verify_lavalink_playback_and_fallback(guild_id, query))
             return
 
         source, attempted_queries = await try_resolve_player_with_fallback(query)
