@@ -28,9 +28,9 @@ import xml.etree.ElementTree as ET
 
 from dotenv import load_dotenv
 
-# =========================
+# ====
 # 경로 / 환경변수
-# =========================
+# ====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.getenv("DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or "/data"
 if not os.path.isdir(DATA_DIR):
@@ -53,9 +53,9 @@ YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.
 YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
 
 
-# =========================
+# ====
 # 음악 백엔드 설정
-# =========================
+# ====
 MUSIC_BACKEND = (os.getenv("MUSIC_BACKEND") or "lavalink").strip().lower()
 MUSIC_AUTO_FALLBACK = os.getenv("MUSIC_AUTO_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
 MUSIC_AUTO_RESTORE_LAVALINK = os.getenv("MUSIC_AUTO_RESTORE_LAVALINK", "true").lower() in ("1", "true", "yes", "on")
@@ -68,11 +68,11 @@ def get_active_music_backend() -> str:
 
 
 def use_lavalink_backend() -> bool:
-<<<<<<< HEAD
+ HEAD
     return get_active_music_backend() == "lavalink"
-=======
+
     return False
->>>>>>> 51ec4963c5d50fd7c01cc65649feebd144f14332
+ 51ec4963c5d50fd7c01cc65649feebd144f14332
 
 
 def set_active_music_backend(backend: str, reason: str = ""):
@@ -119,9 +119,9 @@ COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
 FONT_FILE = os.path.join(BASE_DIR, "onglefont.ttf")
 FONT_LOGGED = False
 
-# =========================
+# ====
 # 기본 설정
-# =========================
+# ====
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
@@ -383,9 +383,9 @@ slash_sync_done = False
 music_queues = {}
 music_states = {}
 
-# =========================
+# ====
 # 색상 설정
-# =========================
+# ====
 PASTEL_COLORS = {
     "pastel_pink": {"label": "🌸 핑크", "rgb": [245, 168, 184]},
     "pastel_red": {"label": "🍓 레드", "rgb": [239, 154, 154]},
@@ -851,9 +851,9 @@ def find_matching_schedules(keyword: str):
     results.sort(key=lambda x: (-x[0], x[1]))
     return results
 
-# =========================
+# ====
 # 음악 설정
-# =========================
+# ====
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
     "options": "-vn -loglevel panic -bufsize 64k"
@@ -1284,9 +1284,9 @@ async def try_resolve_player_with_fallback(query: str):
     player = await YTDLSource.from_query(query)
     return player, attempted_queries or [query]
 
-# =========================
+# ====
 # 파일 저장 / 불러오기
-# =========================
+# ====
 def save_schedule():
     with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
         json.dump(schedule, f, ensure_ascii=False, indent=2)
@@ -1370,9 +1370,9 @@ def load_music_data():
         state["restored_queue"] = [item for item in saved.get("queue", []) if isinstance(item, str)]
 
 
-# =========================
+# ====
 # 공통 유틸
-# =========================
+# ====
 def resolve_font_path():
     candidates = [
         FONT_FILE,
@@ -1490,9 +1490,9 @@ async def send_schedule_list_message(target):
         await target.send(f"```{chunk}```")
 
 
-# =========================
+# ====
 # 일정 알림 체크
-# =========================
+# ====
 async def check_schedule():
     await bot.wait_until_ready()
 
@@ -1568,9 +1568,9 @@ async def check_schedule():
         await asyncio.sleep(30)
 
 
-# =========================
+# ====
 # 음악 재생
-# =========================
+# ====
 async def verify_lavalink_playback_and_fallback(guild_id: int, query: str):
     await asyncio.sleep(3)
 
@@ -1732,9 +1732,9 @@ async def play_next(guild_id: int):
             await send_music_message(guild_id, f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
 
 
-# =========================
+# ====
 # 캘린더 이미지 생성
-# =========================
+# ====
 def create_calendar_image(year: int, month: int):
     width, height = 1100, 1300
     image = Image.new("RGB", (width, height), (20, 20, 24))
@@ -1869,9 +1869,9 @@ def create_calendar_image(year: int, month: int):
     return output_file
 
 
-# =========================
+# ====
 # 도움말 UI
-# =========================
+# ====
 class HelpView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
@@ -1960,9 +1960,9 @@ class ScheduleListButton(discord.ui.Button):
             await interaction.followup.send(f"```{chunk}```", ephemeral=True)
 
 
-# =========================
+# ====
 # 색상 UI
-# =========================
+# ====
 class ColorSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -1997,9 +1997,9 @@ class ColorButton(discord.ui.Button):
         await interaction.response.send_message("색을 보고 골라줘", view=view, ephemeral=True)
 
 
-# =========================
+# ====
 # 모달 UI
-# =========================
+# ====
 class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
     date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25 또는 20260325")
     time_input = discord.ui.TextInput(label="시간", placeholder="18:00 또는 18시")
@@ -2498,9 +2498,9 @@ class FinalCalendarView(discord.ui.View):
         file_path = await asyncio.to_thread(create_calendar_image, self.year, self.month)
         await interaction.message.edit(attachments=[discord.File(file_path)], view=FinalCalendarView(self.year, self.month))
 
-# =========================
+# ====
 # 캘린더 UI
-# =========================
+# ====
 class CalendarView(discord.ui.View):
     def __init__(self, year, month):
         super().__init__(timeout=3600)
@@ -2562,9 +2562,9 @@ class CalendarView(discord.ui.View):
         await interaction.response.send_message("🔕 알림 삭제할 일정을 골라줘", view=ScheduleSelectView("delete_alert"), ephemeral=True)
 
 
-# =========================
+# ====
 # 음악 UI
-# =========================
+# ====
 
 class MusicView(discord.ui.View):
     def __init__(self, guild_id: int):
@@ -2749,9 +2749,9 @@ class MusicView(discord.ui.View):
         await interaction.response.send_message("삭제할 노래를 골라줘", view=MusicDeleteView(self.guild_id), ephemeral=True)
 
 
-# =========================
+# ====
 # 이벤트
-# =========================
+# ====
 @bot.event
 async def on_ready():
     global schedule_task_started, slash_sync_done
@@ -2915,9 +2915,9 @@ async def on_wavelink_track_exception(payload):
     await play_next(guild_id)
 
 
-# =========================
+# ====
 # 음악 명령어
-# =========================
+# ====
 @bot.command(name="재시동")
 @commands.is_owner()
 async def restart(ctx):
@@ -3157,9 +3157,9 @@ async def queue_list(ctx):
     await send_queue_list(ctx, guild_id)
 
 
-# =========================
+# ====
 # 플레이리스트 기능
-# =========================
+# ====
 @bot.command(name="플레이리스트정보")
 async def playlist_info(ctx, *, query: str):
     if not is_youtube_playlist_url(query):
@@ -3187,9 +3187,9 @@ async def playlist_info(ctx, *, query: str):
         await ctx.send(f"```{chunk}```")
 
 
-# =========================
+# ====
 # 가사 기능
-# =========================
+# ====
 @bot.command(name="가사")
 async def lyrics(ctx, *, song: str = None):
     guild_id = ctx.guild.id if ctx.guild else None
@@ -3226,9 +3226,9 @@ async def lyrics(ctx, *, song: str = None):
         await ctx.send(f"```{chunk}```")
 
 
-# =========================
+# ====
 # 도움말 명령어
-# =========================
+# ====
 @bot.command(name="도움말")
 async def help_command(ctx):
     await ctx.send("보고 싶은 기능을 골라줘", view=HelpView())
@@ -3274,9 +3274,9 @@ async def music_status(ctx):
     )
 
 
-# =========================
+# ====
 # 일정 명령어
-# =========================
+# ====
 @bot.command(name="일정추가")
 async def add_schedule_cmd(ctx, date, time_input, *, text):
     user_id = str(ctx.author.id)
@@ -3326,18 +3326,18 @@ async def list_schedule(ctx):
 
 
 
-# =========================
+# ====
 # 실행
-# =========================
+# ====
 @restart.error
 async def restart_error(ctx, error):
     if isinstance(error, commands.NotOwner):
         await ctx.send("❌ 이 명령어는 봇 관리자만 사용할 수 있어.")
 
 
-# =========================
+# ====
 # 슬래시 컨텍스트 / 슬래시 명령어
-# =========================
+# ====
 class InteractionCtx:
     def __init__(self, interaction: discord.Interaction):
         self.interaction = interaction
