@@ -259,12 +259,21 @@ async def clear_stale_voice_state(guild):
         await asyncio.sleep(1.0)
 
 
-async def wait_for_lavalink_player_ready(player, timeout: float = 15.0) -> bool:
+async def wait_for_lavalink_player_ready(player, guild, channel_id: int, timeout: float = 20.0) -> bool:
     loop = asyncio.get_running_loop()
     end_time = loop.time() + timeout
+
     while loop.time() < end_time:
         try:
-            if getattr(player, "channel", None) is not None and getattr(player, "guild", None) is not None:
+            guild_vc = guild.voice_client
+            player_channel = getattr(player, "channel", None)
+            if (
+                isinstance(guild_vc, wavelink.Player)
+                and getattr(guild_vc, "channel", None) is not None
+                and guild_vc.channel.id == channel_id
+                and player_channel is not None
+                and player_channel.id == channel_id
+            ):
                 return True
         except Exception:
             pass
@@ -3095,13 +3104,27 @@ async def join(ctx):
     save_music_data()
 
     existing_vc = ctx.guild.voice_client
-    if existing_vc is not None and getattr(existing_vc, "channel", None) == channel:
+    if (
+        existing_vc is not None
+        and getattr(existing_vc, "channel", None) is not None
+        and existing_vc.channel.id == channel.id
+    ):
         backend_name = "Lavalink" if isinstance(existing_vc, wavelink.Player) else "Direct"
         await ctx.send(f"✅ 이미 {channel.name}에 연결되어 있어 ({backend_name})")
         return
 
     try:
         player = await get_or_connect_player(ctx)
+
+        if isinstance(player, wavelink.Player):
+            ready = await wait_for_lavalink_player_ready(player, ctx.guild, channel.id, timeout=20.0)
+            if not ready:
+                await clear_stale_voice_state(ctx.guild)
+                player = await get_or_connect_player(ctx)
+                ready = await wait_for_lavalink_player_ready(player, ctx.guild, channel.id, timeout=20.0)
+                if not ready:
+                    raise RuntimeError(f"{channel.name} 음성 채널 연결이 유지되지 않고 있어")
+
         backend_name = "Lavalink" if isinstance(player, wavelink.Player) else "Direct"
         await ctx.send(f"✅ {channel.name} 입장 완료 ({backend_name})")
     except asyncio.TimeoutError:
