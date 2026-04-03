@@ -247,8 +247,8 @@ async def get_or_connect_player(ctx):
         try:
             await ensure_lavalink_ready()
 
-            existing_vc = ctx.voice_client
-            player = resolve_voice_client(ctx)
+            existing_vc = ctx.guild.voice_client
+            player = existing_vc if isinstance(existing_vc, wavelink.Player) else None
 
             if existing_vc is not None and player is None:
                 try:
@@ -258,12 +258,22 @@ async def get_or_connect_player(ctx):
                         await existing_vc.disconnect()
                     except Exception:
                         pass
+                await asyncio.sleep(1)
                 player = None
 
             if player is None:
-                player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+                player = await asyncio.wait_for(
+                    channel.connect(
+                        cls=wavelink.Player,
+                        timeout=60,
+                        reconnect=True,
+                        self_deaf=False,
+                        self_mute=False,
+                    ),
+                    timeout=70,
+                )
             elif player.channel != channel:
-                await player.move_to(channel)
+                await asyncio.wait_for(player.move_to(channel), timeout=60)
 
             try:
                 set_volume = getattr(player, "set_volume", None)
@@ -285,7 +295,6 @@ async def get_or_connect_player(ctx):
     state["last_text_channel_id"] = ctx.channel.id
     save_music_data()
     return player
-
 
 def _direct_after_play(guild_id: int, error):
     try:
@@ -1149,6 +1158,47 @@ def build_query_candidates(query: str):
     return candidates[:4]
 
 
+def optimize_query(query: str) -> str:
+    raw = (query or "").strip()
+    if not raw:
+        return raw
+    if raw.startswith(("http://", "https://", "ytsearch:", "ytmsearch:", "scsearch:")):
+        return raw
+
+    normalized = normalize_song_text(raw)
+    if normalized.endswith(" 노래"):
+        artist_only = raw.replace("노래", "").strip()
+        if artist_only:
+            return f"{artist_only} official audio"
+
+    artist, title = extract_artist_title(raw)
+    if artist and title:
+        return f"{artist} {title} official audio"
+
+    return f"{raw} official audio"
+
+
+async def search_lavalink_track_with_retry(query: str):
+    attempts = []
+    extra_candidates = [
+        optimize_query(query),
+        f"{query} topic",
+        f"{query} lyrics",
+    ]
+
+    for candidate in build_query_candidates(query) + extra_candidates:
+        candidate = (candidate or "").strip()
+        if not candidate or candidate in attempts:
+            continue
+        attempts.append(candidate)
+        try:
+            return await search_lavalink_track(candidate)
+        except Exception:
+            continue
+
+    raise ValueError("검색 결과가 없습니다.")
+
+
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -1638,7 +1688,7 @@ async def play_next(guild_id: int):
 
     try:
         if isinstance(voice_client, wavelink.Player) and use_lavalink_backend():
-            track, matched_query = await search_lavalink_track(query)
+            track, matched_query = await search_lavalink_track_with_retry(query)
 
             state["current"] = {
                 "title": getattr(track, "title", query),
@@ -3003,6 +3053,8 @@ async def join(ctx):
         player = await get_or_connect_player(ctx)
         backend_name = "Lavalink" if isinstance(player, wavelink.Player) else "Direct"
         await ctx.send(f"✅ {channel.name} 입장 완료 ({backend_name})")
+    except asyncio.TimeoutError:
+        await ctx.send("❌ 음성 채널 연결이 너무 오래 걸려서 실패했어. 봇을 채널에서 완전히 내보낸 뒤 다시 시도해줘.")
     except Exception as e:
         await ctx.send(f"❌ 입장 실패: {e}")
 
@@ -3045,6 +3097,9 @@ async def play(ctx, *, query: str = None):
 
     try:
         player = await get_or_connect_player(ctx)
+    except asyncio.TimeoutError:
+        await ctx.send("❌ 음성 채널 연결이 너무 오래 걸려서 실패했어. 봇을 채널에서 완전히 내보낸 뒤 다시 시도해줘.")
+        return
     except Exception as e:
         await ctx.send(str(e))
         return
