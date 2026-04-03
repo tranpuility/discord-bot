@@ -70,7 +70,6 @@ def get_active_music_backend() -> str:
 def use_lavalink_backend() -> bool:
     return get_active_music_backend() == "lavalink"
 
-
 def set_active_music_backend(backend: str, reason: str = ""):
     global ACTIVE_MUSIC_BACKEND, LAST_LAVALINK_RETRY_AT
     backend = (backend or "direct").strip().lower()
@@ -238,95 +237,33 @@ async def _connect_direct_voice(ctx, channel):
     return voice_client
 
 
-async def force_clear_voice_state(guild):
-    vc = guild.voice_client
-
-    if vc is not None:
-        try:
-            if isinstance(vc, wavelink.Player):
-                try:
-                    await vc.stop()
-                except Exception:
-                    pass
-                try:
-                    await vc.disconnect(force=True)
-                except Exception:
-                    try:
-                        await vc.disconnect()
-                    except Exception:
-                        pass
-            else:
-                try:
-                    await vc.disconnect(force=True)
-                except TypeError:
-                    await vc.disconnect()
-                except Exception:
-                    try:
-                        await vc.disconnect()
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"[voice] disconnect 정리 실패: {e}", flush=True)
-
-    await asyncio.sleep(1.5)
-
-    try:
-        me = guild.me
-    except Exception:
-        me = None
-
-    if me and getattr(me, "voice", None) and getattr(me.voice, "channel", None) is not None:
-        try:
-            await guild.change_voice_state(channel=None, self_mute=False, self_deaf=False)
-            print(f"[voice] guild voice state 강제 해제: {guild.id}", flush=True)
-        except Exception as e:
-            print(f"[voice] guild voice state 해제 실패: {e}", flush=True)
-        await asyncio.sleep(1.5)
-
-
-async def normalize_connected_voice_state(guild, channel):
-    try:
-        await guild.change_voice_state(channel=channel, self_mute=False, self_deaf=False)
-    except Exception as e:
-        print(f"[voice] self mute/deaf 해제 실패: {e}", flush=True)
-
-
 async def get_or_connect_player(ctx):
     if ctx.author.voice is None or ctx.author.voice.channel is None:
         raise ValueError("음성 채널 먼저 들어가줘")
 
     channel = ctx.author.voice.channel
 
-    if MUSIC_BACKEND == "lavalink":
-        await try_restore_lavalink_backend()
-
     if use_lavalink_backend():
         try:
             await ensure_lavalink_ready()
-            existing_vc = ctx.voice_client
-            player = existing_vc if isinstance(existing_vc, wavelink.Player) else None
 
-            if existing_vc is None and ctx.guild.me and getattr(ctx.guild.me, "voice", None) and getattr(ctx.guild.me.voice, "channel", None) is not None:
-                await force_clear_voice_state(ctx.guild)
-                existing_vc = None
-                player = None
+            existing_vc = ctx.voice_client
+            player = resolve_voice_client(ctx)
 
             if existing_vc is not None and player is None:
-                await force_clear_voice_state(ctx.guild)
-                existing_vc = None
-                player = None
-
-            if player is not None and getattr(player, "channel", None) != channel:
                 try:
-                    await player.move_to(channel)
-                    await normalize_connected_voice_state(ctx.guild, channel)
+                    await existing_vc.disconnect(force=True)
                 except Exception:
-                    await force_clear_voice_state(ctx.guild)
-                    player = None
+                    try:
+                        await existing_vc.disconnect()
+                    except Exception:
+                        pass
+                player = None
 
             if player is None:
                 player = await channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
-                await normalize_connected_voice_state(ctx.guild, channel)
+            elif player.channel != channel:
+                await player.move_to(channel)
 
             try:
                 set_volume = getattr(player, "set_volume", None)
@@ -334,35 +271,14 @@ async def get_or_connect_player(ctx):
                     await set_volume(100)
             except Exception as e:
                 print(f"[music-backend] lavalink 볼륨 설정 실패: {e}", flush=True)
-
         except Exception as e:
             if not MUSIC_AUTO_FALLBACK:
                 raise
             print(f"[music-backend] lavalink 연결 실패 → direct 폴백: {e}", flush=True)
-            set_active_music_backend("direct", f"플레이어 연결 실패 후 자동 전환: {e}")
-
-            await force_clear_voice_state(ctx.guild)
-
-            player = ctx.guild.voice_client
-            if player is None:
-                player = await channel.connect(self_deaf=False)
-            elif getattr(player, "channel", None) != channel:
-                await player.move_to(channel)
-
-            await normalize_connected_voice_state(ctx.guild, channel)
+            set_active_music_backend("direct", f"lavalink 연결 실패: {e}")
+            player = await _connect_direct_voice(ctx, channel)
     else:
-        if isinstance(ctx.voice_client, wavelink.Player) or (
-            ctx.guild.me and getattr(ctx.guild.me, "voice", None) and getattr(ctx.guild.me.voice, "channel", None) is not None
-        ):
-            await force_clear_voice_state(ctx.guild)
-
-        player = ctx.guild.voice_client
-        if player is None:
-            player = await channel.connect(self_deaf=False)
-        elif getattr(player, "channel", None) != channel:
-            await player.move_to(channel)
-
-        await normalize_connected_voice_state(ctx.guild, channel)
+        player = await _connect_direct_voice(ctx, channel)
 
     state = get_music_state(ctx.guild.id)
     state["last_voice_channel_id"] = channel.id
