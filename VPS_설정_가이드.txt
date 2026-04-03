@@ -1,0 +1,17 @@
+Railway Variables 설정
+
+MUSIC_BACKEND=lavalink
+MUSIC_AUTO_FALLBACK=true
+MUSIC_AUTO_RESTORE_LAVALINK=true
+LAVALINK_HOST=여기에_VPS_주소
+LAVALINK_PORT=2333
+LAVALINK_PASSWORD=여기에_비밀번호
+LAVALINK_SECURE=false
+
+유료 VPS 만료 또는 중단 시
+- Lavalink 연결 실패 시 Direct로 자동 폴백
+- VPS 복구 후 자동 복구 시도
+
+주의
+- LAVALINK_HOST, PORT, PASSWORD는 VPS application.yml과 일치해야 함
+- 2333 포트가 열려 있어야 함

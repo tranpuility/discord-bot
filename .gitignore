@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Cache
+.cache/
+pip-wheel-metadata/
+
+# Local data (굳이 올릴 필요 없음)
+*.sqlite3
+
+# 이미지/임시파일 (캘린더 생성파일)
+calendar_*.png
+
+# dotenv (보안)
+.env
+
+# 기타
+dist/
+build/
+
+# 빌드 최적화 (Railway)
+ffmpeg-*
+*.pdf
+# *.ttf
+*.png

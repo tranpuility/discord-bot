@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.git
+.gitignore
+*.log
+*.png
+*.pdf
+ffmpeg-*
+!onglefont.ttf
