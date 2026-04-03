@@ -68,7 +68,11 @@ def get_active_music_backend() -> str:
 
 
 def use_lavalink_backend() -> bool:
+<<<<<<< HEAD
     return get_active_music_backend() == "lavalink"
+=======
+    return False
+>>>>>>> 51ec4963c5d50fd7c01cc65649feebd144f14332
 
 
 def set_active_music_backend(backend: str, reason: str = ""):
