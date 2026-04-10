@@ -846,9 +846,10 @@ class HelpView(discord.ui.View):
             "/일정추가 날짜 시간 내용\n"
             "/일정삭제 번호\n"
             "/일정목록\n"
+            "/일정검색\n"
             "/일정수정\n\n"
             "일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n"
-            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n\n"
+            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -857,23 +858,25 @@ class HelpView(discord.ui.View):
         text = build_tts_help_text()
         await interaction.response.send_message(text, ephemeral=True)
 
+    @discord.ui.button(label="🎮 기타", style=discord.ButtonStyle.secondary)
+    async def misc_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        text = (
+            "🎮 기타 도움말\n\n"
+            "/주사위 : 주사위를 굴려\n"
+            "/랜덤 : 입력한 후보 중 하나를 골라\n"
+            "/투표 : 반응 이모지 투표를 만들어\n"
+            "/워치투게더 : 현재 음성 채널용 워치 투게더 링크를 만들어\n"
+            "/음성테스트 : 현재 내 음성 설정이 실제로 되는지 테스트해\n"
+            "/음성상태 : 현재 읽기 상태와 적용된 음성을 확인해\n"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
+
 class HelpButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
-        text = (
-            "📅 일정 도움말\n\n"
-            "/캘린더\n"
-            "/캘린더 2026 03\n"
-            "/일정추가 날짜 시간 내용\n"
-            "/일정삭제 번호\n"
-            "/일정목록\n"
-            "/일정수정\n\n"
-            "일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n"
-            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n\n"
-        )
-        await interaction.response.send_message(text, ephemeral=True)
+        await interaction.response.send_message("보고 싶은 도움말을 골라줘", view=HelpView(), ephemeral=True)
 
 class ScheduleHelpButton(discord.ui.Button):
     def __init__(self):
@@ -1719,8 +1722,9 @@ TTS_VOICE_CHOICES = {
     "서현": {"voice": "ko-KR-SeoHyeonNeural", "tone": "맑고 안정적인 여성톤"},
     "인준": {"voice": "ko-KR-InJoonNeural", "tone": "차분한 남성톤"},
     "봉진": {"voice": "ko-KR-BongJinNeural", "tone": "또렷하고 단정한 남성톤"},
-    "현수": {"voice": "ko-KR-HyunSuNeural", "tone": "부드럽고 젊은 남성톤"},
+    "현수": {"voice": "ko-KR-HyunsuNeural", "tone": "부드럽고 젊은 남성톤"},
 }
+TTS_FALLBACK_LABELS = ["선하", "지민", "서현", "인준", "봉진", "현수"]
 
 def get_voice_info(label: str) -> dict:
     return TTS_VOICE_CHOICES.get(label, {"voice": "ko-KR-SunHiNeural", "tone": "밝고 부드러운 여성톤"})
@@ -1741,7 +1745,10 @@ def build_tts_help_text() -> str:
 설정
 /읽기채널 : 현재 채널을 읽기 채널로 설정
 /닉네임읽기 : 닉네임을 같이 읽을지 설정
-/음성 : 한국어 이름으로 TTS 목소리 선택
+/전체 : 서버 전체 목소리를 따라가도록 전환
+/개별 : 내 계정만 따로 목소리 설정
+/음성 : 현재 모드(전체/개별)에 맞춰 TTS 목소리 선택
+/음성설정취소 : 내 개별 음성 설정 해제 후 전체 모드로 복귀
 /속도 : 읽는 속도 조절 (예: 0.8 ~ 1.2)
 /톤 : 목소리 높낮이 조절 (예: 0.8 ~ 1.2)
 /읽기최적화 : 메시지 길이에 따라 속도와 간격을 자동 보정
@@ -1753,7 +1760,8 @@ def build_tts_help_text() -> str:
 /읽기대상초기화 : 포함/제외 설정 초기화
 
 상태 확인
-/읽기상태 : 현재 자동 읽기 상태 확인
+/읽기상태, /음성상태 : 현재 자동 읽기 상태 확인
+/음성테스트 : 내 목소리 설정이 실제로 되는지 확인
 /워치투게더 : 현재 음성 채널용 워치 투게더 초대 링크 생성
 /tts도움말 : 이 도움말 다시 보기
 
@@ -1792,6 +1800,8 @@ TTS_DEFAULT_SETTINGS = {
     "between_delay": 0.15,
     "auto_optimize": True,
     "priority_mode": True,
+    "user_voice_overrides": {},
+    "user_voice_modes": {},
 }
 
 tts_settings = {}
@@ -1831,7 +1841,69 @@ def get_tts_settings(guild_id: int):
     settings.setdefault("rate", "+0%")
     settings.setdefault("pitch", "+0Hz")
     settings.setdefault("between_delay", 0.15)
+    settings.setdefault("user_voice_overrides", {})
+    settings.setdefault("user_voice_modes", {})
+    if not isinstance(settings.get("user_voice_overrides"), dict):
+        settings["user_voice_overrides"] = {}
+    if not isinstance(settings.get("user_voice_modes"), dict):
+        settings["user_voice_modes"] = {}
     return settings
+
+def get_user_voice_override(settings: dict, user_id: int) -> dict | None:
+    overrides = settings.get("user_voice_overrides", {})
+    if not isinstance(overrides, dict):
+        return None
+    override = overrides.get(str(user_id))
+    return override if isinstance(override, dict) else None
+
+def get_user_voice_mode(settings: dict, user_id: int) -> str:
+    modes = settings.get("user_voice_modes", {})
+    if not isinstance(modes, dict):
+        return "user"
+    mode = str(modes.get(str(user_id), "user")).lower()
+    return "guild" if mode == "guild" else "user"
+
+def set_user_voice_mode(settings: dict, user_id: int, mode: str):
+    modes = settings.setdefault("user_voice_modes", {})
+    if not isinstance(modes, dict):
+        modes = {}
+        settings["user_voice_modes"] = modes
+    modes[str(user_id)] = "guild" if str(mode).lower() == "guild" else "user"
+
+def clear_user_voice_override(settings: dict, user_id: int):
+    overrides = settings.setdefault("user_voice_overrides", {})
+    if isinstance(overrides, dict):
+        overrides.pop(str(user_id), None)
+    modes = settings.setdefault("user_voice_modes", {})
+    if isinstance(modes, dict):
+        modes.pop(str(user_id), None)
+
+def set_user_voice_override(settings: dict, user_id: int, label: str):
+    overrides = settings.setdefault("user_voice_overrides", {})
+    if not isinstance(overrides, dict):
+        overrides = {}
+        settings["user_voice_overrides"] = overrides
+    voice_info = get_voice_info(label)
+    overrides[str(user_id)] = {
+        "voice_label": label,
+        "voice": voice_info["voice"],
+        "tone": voice_info["tone"],
+    }
+    return overrides[str(user_id)]
+
+def build_effective_tts_settings(settings: dict, user_id: int | None = None) -> dict:
+    effective = dict(settings)
+    if user_id is not None:
+        mode = get_user_voice_mode(settings, user_id)
+        effective["voice_mode"] = mode
+        if mode == "user":
+            override = get_user_voice_override(settings, user_id)
+            if override:
+                effective["voice_label"] = override.get("voice_label", effective.get("voice_label", "선하"))
+                effective["voice"] = override.get("voice", effective.get("voice", "ko-KR-SunHiNeural"))
+        else:
+            effective["voice_mode"] = "guild"
+    return effective
 
 def normalize_rate(value: float) -> str:
     value = max(0.5, min(2.0, float(value)))
@@ -1971,26 +2043,49 @@ async def ensure_connected_to_saved_voice(guild: discord.Guild, settings: dict):
 
     return voice_client
 
-async def synthesize_edge_tts(text_value: str, settings: dict, rate: str | None = None, pitch: str | None = None) -> str:
-    temp_path = os.path.join(TTS_TEMP_DIR, f"tts_{uuid.uuid4().hex}.mp3")
-    communicate = edge_tts.Communicate(
-        text_value,
-        voice=settings.get("voice", "ko-KR-SunHiNeural"),
-        rate=rate or settings.get("rate", "+0%"),
-        pitch=pitch or settings.get("pitch", "+0Hz"),
-    )
-    await communicate.save(temp_path)
-    return temp_path
+async def synthesize_edge_tts(text_value: str, settings: dict, rate: str | None = None, pitch: str | None = None) -> tuple[str, dict]:
+    rate_value = rate or settings.get("rate", "+0%")
+    pitch_value = pitch or settings.get("pitch", "+0Hz")
+    selected_label = settings.get("voice_label", "선하")
+    fallback_labels = [selected_label] + [label for label in TTS_FALLBACK_LABELS if label != selected_label]
+    last_error = None
 
-async def play_tts_for_guild(guild: discord.Guild, text_value: str):
+    for label in fallback_labels:
+        voice_info = get_voice_info(label)
+        temp_path = os.path.join(TTS_TEMP_DIR, f"tts_{uuid.uuid4().hex}.mp3")
+        try:
+            communicate = edge_tts.Communicate(
+                text_value,
+                voice=voice_info["voice"],
+                rate=rate_value,
+                pitch=pitch_value,
+            )
+            await communicate.save(temp_path)
+            used = dict(settings)
+            used["voice_label"] = label
+            used["voice"] = voice_info["voice"]
+            return temp_path, used
+        except Exception as e:
+            last_error = e
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+            print(f"TTS 음성 실패: {label} -> {e}", flush=True)
+            continue
+
+    raise RuntimeError(f"사용 가능한 TTS 음성을 찾지 못했어: {last_error}")
+
+async def play_tts_for_guild(guild: discord.Guild, text_value: str, voice_settings: dict | None = None):
     text_value = clean_tts_text(text_value)
     if not text_value:
         return
 
-    settings = get_tts_settings(guild.id)
+    settings = voice_settings or get_tts_settings(guild.id)
     voice_client = await ensure_connected_to_saved_voice(guild, settings)
     profile = get_dynamic_tts_profile(text_value, settings)
-    temp_path = await synthesize_edge_tts(text_value, settings, profile["rate"], profile["pitch"])
+    temp_path, used_settings = await synthesize_edge_tts(text_value, settings, profile["rate"], profile["pitch"])
 
     finished = asyncio.Event()
 
@@ -2011,11 +2106,11 @@ async def play_tts_for_guild(guild: discord.Guild, text_value: str):
 
 tts_queue_counters = {}
 
-async def enqueue_tts_message(guild: discord.Guild, text_value: str, priority: int = 5):
+async def enqueue_tts_message(guild: discord.Guild, text_value: str, priority: int = 5, voice_settings: dict | None = None):
     queue = tts_queues.setdefault(guild.id, asyncio.PriorityQueue())
     counter = tts_queue_counters.get(guild.id, 0) + 1
     tts_queue_counters[guild.id] = counter
-    await queue.put((priority, counter, text_value))
+    await queue.put((priority, counter, text_value, voice_settings))
 
     worker = tts_workers.get(guild.id)
     if worker is None or worker.done():
@@ -2027,12 +2122,12 @@ async def tts_worker(guild: discord.Guild):
     async with lock:
         while True:
             try:
-                _, _, text_value = await asyncio.wait_for(queue.get(), timeout=180)
+                _, _, text_value, voice_settings = await asyncio.wait_for(queue.get(), timeout=180)
             except asyncio.TimeoutError:
                 break
 
             try:
-                await play_tts_for_guild(guild, text_value)
+                await play_tts_for_guild(guild, text_value, voice_settings)
             except Exception as e:
                 print(f"tts worker 오류: {e}", flush=True)
             finally:
@@ -2147,19 +2242,22 @@ async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_ch
 async def disable_auto_tts(guild: discord.Guild):
     await stop_voice_session(guild, disable_tts=True, clear_queue=True)
 
-def build_auto_tts_status(settings: dict, guild: discord.Guild, channel: discord.TextChannel | None = None) -> str:
+def build_auto_tts_status(settings: dict, guild: discord.Guild, channel: discord.TextChannel | None = None, user_id: int | None = None) -> str:
     read_nickname = "켜짐" if settings.get("read_nickname", True) else "꺼짐"
     enabled = "켜짐" if settings.get("enabled") else "꺼짐"
     channel_text = f"<#{channel.id}>" if channel else "없음"
-    voice_label = settings.get("voice_label", "선하")
+    effective = build_effective_tts_settings(settings, user_id)
+    voice_label = effective.get("voice_label", "선하")
     voice_info = get_voice_info(voice_label)
-    voice_value = settings.get("voice", voice_info["voice"])
+    voice_value = effective.get("voice", voice_info["voice"])
     voice_tone = voice_info["tone"]
     target_summary = build_target_summary(settings, guild)
+    voice_mode = "개별" if effective.get("voice_mode") == "user" else "전체"
     return (
         f"자동 읽기: {enabled}\n"
         f"읽기 채널: {channel_text}\n"
         f"닉네임 읽기: {read_nickname}\n"
+        f"음성 모드: {voice_mode}\n"
         f"목소리: {voice_label} - {voice_tone} ({voice_value})\n"
         f"속도: {settings.get('rate', '+0%')}\n"
         f"톤: {settings.get('pitch', '+0Hz')}\n"
@@ -2249,8 +2347,9 @@ async def on_message(message: discord.Message):
     if settings.get("read_nickname", True):
         text_value = f"{message.author.display_name} {text_value}"
 
-    priority = compute_tts_priority(message, text_value, settings)
-    await enqueue_tts_message(message.guild, text_value, priority)
+    effective_settings = build_effective_tts_settings(settings, message.author.id)
+    priority = compute_tts_priority(message, text_value, effective_settings)
+    await enqueue_tts_message(message.guild, text_value, priority, effective_settings)
 
 @bot.tree.command(name="워치투게더", description="현재 음성 채널용 워치 투게더 초대 링크를 만듭니다")
 async def slash_watch_together(interaction: discord.Interaction):
@@ -2338,6 +2437,39 @@ async def slash_reading_channel(interaction: discord.Interaction):
 async def slash_tts_help(interaction: discord.Interaction):
     await interaction.response.send_message(build_tts_help_text(), ephemeral=True)
 
+@bot.tree.command(name="전체", description="내 음성 설정을 해제하고 서버 전체 목소리를 따라갑니다")
+async def slash_tts_voice_mode_guild(interaction: discord.Interaction):
+    settings = get_tts_settings(interaction.guild.id)
+    set_user_voice_mode(settings, interaction.user.id, "guild")
+    save_tts_settings()
+    await interaction.response.send_message(
+        f"✅ 이제 전체 모드야\n서버 기본 목소리인 {settings.get('voice_label', '선하')} 를 따라가",
+        ephemeral=True,
+    )
+
+@bot.tree.command(name="개별", description="내 계정만 따로 목소리를 설정하는 모드로 바꿉니다")
+async def slash_tts_voice_mode_user(interaction: discord.Interaction):
+    settings = get_tts_settings(interaction.guild.id)
+    set_user_voice_mode(settings, interaction.user.id, "user")
+    if get_user_voice_override(settings, interaction.user.id) is None:
+        set_user_voice_override(settings, interaction.user.id, settings.get("voice_label", "선하"))
+    save_tts_settings()
+    override = get_user_voice_override(settings, interaction.user.id) or {}
+    await interaction.response.send_message(
+        f"✅ 이제 개별 모드야\n내 목소리: {override.get('voice_label', settings.get('voice_label', '선하'))}",
+        ephemeral=True,
+    )
+
+@bot.tree.command(name="음성설정취소", description="내 개별 음성 설정을 지우고 전체 모드로 돌아갑니다")
+async def slash_tts_voice_reset(interaction: discord.Interaction):
+    settings = get_tts_settings(interaction.guild.id)
+    clear_user_voice_override(settings, interaction.user.id)
+    save_tts_settings()
+    await interaction.response.send_message(
+        f"✅ 내 개별 음성 설정을 취소했어\n이제 다시 전체 모드로 {settings.get('voice_label', '선하')} 를 따라가",
+        ephemeral=True,
+    )
+
 @bot.tree.command(name="음성", description="자동 읽기 TTS 목소리를 바꿉니다")
 @app_commands.describe(종류="이름과 톤 설명을 보고 원하는 목소리를 선택")
 @app_commands.choices(종류=[
@@ -2351,11 +2483,22 @@ async def slash_tts_help(interaction: discord.Interaction):
 async def slash_tts_voice(interaction: discord.Interaction, 종류: app_commands.Choice[str]):
     settings = get_tts_settings(interaction.guild.id)
     voice_info = get_voice_info(종류.value)
-    settings["voice_label"] = 종류.value
-    settings["voice"] = voice_info["voice"]
+    mode = get_user_voice_mode(settings, interaction.user.id)
+    if mode == "guild":
+        settings["voice_label"] = 종류.value
+        settings["voice"] = voice_info["voice"]
+        save_tts_settings()
+        await interaction.response.send_message(
+            f"✅ 전체 모드로 목소리를 {종류.value}로 바꿨어\n톤: {voice_info['tone']}\n현재 음성: {settings['voice']}",
+            ephemeral=True,
+        )
+        return
+
+    override = set_user_voice_override(settings, interaction.user.id, 종류.value)
+    set_user_voice_mode(settings, interaction.user.id, "user")
     save_tts_settings()
     await interaction.response.send_message(
-        f"✅ 목소리를 {종류.value}로 바꿨어\n톤: {voice_info['tone']}\n현재 음성: {settings['voice']}",
+        f"✅ 개별 모드로 내 목소리를 {종류.value}로 바꿨어\n톤: {voice_info['tone']}\n현재 음성: {override['voice']}",
         ephemeral=True,
     )
 
@@ -2473,7 +2616,7 @@ async def slash_tts_status(interaction: discord.Interaction):
     settings = get_tts_settings(interaction.guild.id)
     channel = interaction.guild.get_channel(settings.get("text_channel_id")) if settings.get("text_channel_id") else None
     await interaction.response.send_message(
-        "ℹ️ 현재 자동 읽기 상태\n" + build_auto_tts_status(settings, interaction.guild, channel),
+        "ℹ️ 현재 자동 읽기 상태\n" + build_auto_tts_status(settings, interaction.guild, channel, interaction.user.id),
         ephemeral=True,
     )
 
@@ -2519,12 +2662,38 @@ async def slash_poll(interaction: discord.Interaction, 제목: str, 항목들: s
     for i in range(len(items)):
         await message.add_reaction(number_emojis[i])
 
+
+@bot.tree.command(name="음성테스트", description="내가 고른 목소리로 짧게 테스트해봅니다")
+async def slash_tts_voice_test(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ 서버 안에서만 사용할 수 있어", ephemeral=True)
+        return
+    settings = build_effective_tts_settings(get_tts_settings(interaction.guild.id), interaction.user.id)
+    voice_info = get_voice_info(settings.get("voice_label", "선하"))
+    await interaction.response.defer(ephemeral=True)
+    try:
+        temp_path, used_settings = await synthesize_edge_tts("안녕하세요. 음성 테스트예요.", settings)
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+        used_label = used_settings.get("voice_label", settings.get("voice_label", "선하"))
+        fallback_note = ""
+        if used_label != settings.get("voice_label"):
+            fallback_note = f"\n요청한 음성이 잠시 안 돼서 {used_label}로 대신 테스트했어."
+        await interaction.followup.send(
+            f"✅ 음성 테스트 성공\n선택 음성: {settings.get('voice_label', '선하')}\n실제 사용 음성: {used_label} ({used_settings.get('voice')}){fallback_note}",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ 음성 테스트 실패: {e}", ephemeral=True)
+
 @bot.tree.command(name="음성상태", description="자동 읽기 상태와 목소리 설정을 보여줍니다")
 async def slash_voice_status(interaction: discord.Interaction):
     settings = get_tts_settings(interaction.guild.id)
     channel = interaction.guild.get_channel(settings.get("text_channel_id")) if settings.get("text_channel_id") else None
     await interaction.response.send_message(
-        "ℹ️ 현재 음성 상태\n" + build_auto_tts_status(settings, interaction.guild, channel),
+        "ℹ️ 현재 음성 상태\n" + build_auto_tts_status(settings, interaction.guild, channel, interaction.user.id),
         ephemeral=True,
     )
 
