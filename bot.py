@@ -1,3 +1,4 @@
+# music_removed: clean
 # version: 2026-03-28-cookieless-workaround
 import discord
 from discord import app_commands
@@ -6,33 +7,6 @@ import json
 import os
 import sys
 import asyncio
-import aiohttp
-try:
-    import yt_dlp
-except Exception:
-    yt_dlp = None
-try:
-    import wavelink
-except Exception:
-    class _DummyPlayer: pass
-    class _DummyPool:
-        nodes = []
-        @staticmethod
-        async def connect(*args, **kwargs):
-            return None
-    class _DummyNode:
-        def __init__(self, *args, **kwargs):
-            pass
-    class _DummyPlayable:
-        @staticmethod
-        async def search(*args, **kwargs):
-            return []
-    class _DummyWavelink:
-        Player = _DummyPlayer
-        Pool = _DummyPool
-        Node = _DummyNode
-        Playable = _DummyPlayable
-    wavelink = _DummyWavelink()
 import calendar
 import uuid
 import tempfile
@@ -72,397 +46,6 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
-
-YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
-YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "false").lower() in ("1", "true", "yes", "on")
-YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true", "yes", "on")
-YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-YTDLP_DISABLE_WEB_CLIENT = os.getenv("YTDLP_DISABLE_WEB_CLIENT", "false").lower() in ("1", "true", "yes", "on")
-
-
-# =========================
-# 음악 백엔드 설정
-# =========================
-MUSIC_BACKEND = (os.getenv("MUSIC_BACKEND") or "lavalink").strip().lower()
-MUSIC_AUTO_FALLBACK = os.getenv("MUSIC_AUTO_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
-MUSIC_AUTO_RESTORE_LAVALINK = os.getenv("MUSIC_AUTO_RESTORE_LAVALINK", "true").lower() in ("1", "true", "yes", "on")
-ACTIVE_MUSIC_BACKEND = MUSIC_BACKEND
-LAST_LAVALINK_RETRY_AT = None
-
-
-def get_active_music_backend() -> str:
-    return ACTIVE_MUSIC_BACKEND
-
-
-def use_lavalink_backend() -> bool:
-    return get_active_music_backend() == "lavalink"
-
-def set_active_music_backend(backend: str, reason: str = ""):
-    global ACTIVE_MUSIC_BACKEND, LAST_LAVALINK_RETRY_AT
-    backend = (backend or "direct").strip().lower()
-    if backend not in ("direct", "lavalink"):
-        backend = "direct"
-    if ACTIVE_MUSIC_BACKEND != backend:
-        print(f"[music-backend] 전환: {ACTIVE_MUSIC_BACKEND} -> {backend} | {reason}", flush=True)
-    ACTIVE_MUSIC_BACKEND = backend
-    if backend == "direct":
-        LAST_LAVALINK_RETRY_AT = datetime.now()
-
-
-async def try_restore_lavalink_backend():
-    global LAST_LAVALINK_RETRY_AT
-
-    if MUSIC_BACKEND != "lavalink":
-        return False
-    if not MUSIC_AUTO_RESTORE_LAVALINK:
-        return False
-    if get_active_music_backend() == "lavalink":
-        return True
-
-    now = datetime.now()
-    if LAST_LAVALINK_RETRY_AT and (now - LAST_LAVALINK_RETRY_AT).total_seconds() < 60:
-        return False
-
-    LAST_LAVALINK_RETRY_AT = now
-    try:
-        await ensure_lavalink_ready()
-        set_active_music_backend("lavalink", "노드 복구 감지")
-        return True
-    except Exception as e:
-        if MUSIC_AUTO_FALLBACK:
-            set_active_music_backend("direct", f"lavalink 복구 실패: {e}")
-            print(f"[music-backend] lavalink 복구 실패 → direct 유지: {e}", flush=True)
-            return False
-        print(f"[music-backend] lavalink 복구 실패: {e}", flush=True)
-        return False
-
-SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
-COLORS_FILE = os.path.join(DATA_DIR, "colors.json")
-FONT_FILE = os.path.join(BASE_DIR, "onglefont.ttf")
-FONT_LOGGED = False
-
-# =========================
-# 기본 설정
-# =========================
-intents = discord.Intents.default()
-intents.message_content = True
-intents.voice_states = True
-intents.members = True
-
-class SlashBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
-
-    async def setup_hook(self):
-        try:
-            synced_global = await self.tree.sync()
-            print(f"[setup_hook] 글로벌 슬래시 동기화 완료: {len(synced_global)}개", flush=True)
-        except Exception as e:
-            print(f"[setup_hook] 글로벌 슬래시 동기화 실패: {e}", flush=True)
-
-bot = SlashBot()
-
-
-
-
-def make_queue_item(channel_id: int | None, query: str):
-    return (channel_id, query)
-
-
-def unpack_queue_item(item):
-    if isinstance(item, (list, tuple)) and len(item) >= 2:
-        return item[0], item[1]
-    return None, None
-
-
-def get_text_channel_from_id(channel_id: int | None):
-    if not channel_id:
-        return None
-    return bot.get_channel(channel_id)
-
-
-async def send_music_message(guild_id: int, text: str, *, view=None):
-    state = get_music_state(guild_id)
-    channel = get_text_channel_from_id(state.get("last_text_channel_id"))
-    if channel:
-        try:
-            await channel.send(text, view=view)
-        except Exception as e:
-            print(f"음악 메시지 전송 실패: {e}")
-
-
-async def ensure_lavalink_ready():
-    if getattr(bot, "_lavalink_connected", False):
-        return
-
-    host = os.getenv("LAVALINK_HOST")
-    port = int(os.getenv("LAVALINK_PORT", "2333"))
-    password = os.getenv("LAVALINK_PASSWORD")
-    secure = os.getenv("LAVALINK_SECURE", "false").lower() in ("1", "true", "yes", "on")
-
-    if not host or not password:
-        raise RuntimeError("LAVALINK_HOST 또는 LAVALINK_PASSWORD 환경변수가 비어 있습니다.")
-
-    if not wavelink.Pool.nodes:
-        scheme = "https" if secure else "http"
-        node = wavelink.Node(uri=f"{scheme}://{host}:{port}", password=password)
-        await wavelink.Pool.connect(nodes=[node], client=bot)
-
-    bot._lavalink_connected = True
-
-
-def resolve_voice_client(ctx):
-    vc = ctx.voice_client
-    return vc if isinstance(vc, wavelink.Player) else None
-
-
-def player_is_playing(player) -> bool:
-    if not player:
-        return False
-    value = getattr(player, "playing", None)
-    if value is not None:
-        return bool(value)
-    checker = getattr(player, "is_playing", None)
-    if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            return False
-    return False
-
-
-def player_is_paused(player) -> bool:
-    if not player:
-        return False
-    value = getattr(player, "paused", None)
-    if value is not None:
-        return bool(value)
-    checker = getattr(player, "is_paused", None)
-    if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            return False
-    return False
-
-
-async def _connect_direct_voice(ctx, channel):
-    existing_vc = ctx.voice_client
-    player = resolve_voice_client(ctx)
-
-    if player is not None:
-        try:
-            await player.disconnect()
-        except Exception:
-            pass
-        existing_vc = None
-
-    voice_client = existing_vc
-    if voice_client is None:
-        voice_client = await channel.connect(self_deaf=False, self_mute=False)
-    elif getattr(voice_client, "channel", None) != channel:
-        await voice_client.move_to(channel)
-
-    return voice_client
-
-
-async def clear_stale_voice_state(guild):
-    existing_vc = guild.voice_client
-    if existing_vc is not None:
-        try:
-            await existing_vc.disconnect(force=True)
-        except Exception:
-            try:
-                await existing_vc.disconnect()
-            except Exception:
-                pass
-        await asyncio.sleep(1.0)
-
-    me = getattr(guild, "me", None)
-    me_voice = getattr(me, "voice", None)
-    if me_voice and getattr(me_voice, "channel", None) is not None:
-        try:
-            await guild.change_voice_state(channel=None, self_mute=False, self_deaf=False)
-        except Exception:
-            pass
-        await asyncio.sleep(1.0)
-
-
-async def wait_for_lavalink_player_ready(player, timeout: float = 15.0) -> bool:
-    loop = asyncio.get_running_loop()
-    end_time = loop.time() + timeout
-    while loop.time() < end_time:
-        try:
-            if getattr(player, "channel", None) is not None and getattr(player, "guild", None) is not None:
-                return True
-        except Exception:
-            pass
-        await asyncio.sleep(0.5)
-    return False
-
-
-async def get_or_connect_player(ctx):
-    if ctx.author.voice is None or ctx.author.voice.channel is None:
-        raise ValueError("음성 채널 먼저 들어가줘")
-
-    channel = ctx.author.voice.channel
-
-    if use_lavalink_backend():
-        await ensure_lavalink_ready()
-
-        last_error = None
-        for attempt in range(2):
-            try:
-                existing_vc = ctx.guild.voice_client
-                player = existing_vc if isinstance(existing_vc, wavelink.Player) else None
-
-                if existing_vc is not None and player is None:
-                    try:
-                        await existing_vc.disconnect(force=True)
-                    except Exception:
-                        try:
-                            await existing_vc.disconnect()
-                        except Exception:
-                            pass
-                    await asyncio.sleep(1.0)
-                    existing_vc = None
-                    player = None
-
-                if player is None:
-                    player = await asyncio.wait_for(
-                        channel.connect(
-                            cls=wavelink.Player,
-                            self_deaf=False,
-                            self_mute=False,
-                        ),
-                        timeout=45,
-                    )
-                    print(f"[music-backend] lavalink voice join 성공: guild={ctx.guild.id} channel={channel.id}", flush=True)
-                elif getattr(player, "channel", None) != channel:
-                    await asyncio.wait_for(player.move_to(channel), timeout=45)
-                    print(f"[music-backend] lavalink voice 이동 성공: guild={ctx.guild.id} channel={channel.id}", flush=True)
-                else:
-                    print(f"[music-backend] lavalink voice 재사용: guild={ctx.guild.id} channel={channel.id}", flush=True)
-
-                ready = await wait_for_lavalink_player_ready(player, ctx.guild, channel.id, timeout=15.0)
-                if not ready:
-                    raise RuntimeError("Lavalink 플레이어 연결 준비가 지연되고 있어")
-
-                try:
-                    set_volume = getattr(player, "set_volume", None)
-                    if callable(set_volume):
-                        await set_volume(100)
-                except Exception as e:
-                    print(f"[music-backend] lavalink 볼륨 설정 실패: {e}", flush=True)
-
-                state = get_music_state(ctx.guild.id)
-                state["last_voice_channel_id"] = channel.id
-                state["last_text_channel_id"] = ctx.channel.id
-                save_music_data()
-                return player
-
-            except Exception as e:
-                last_error = e
-                print(f"[music-backend] lavalink 음성 연결 시도 실패({attempt + 1}/2): {e}", flush=True)
-                await clear_stale_voice_state(ctx.guild)
-                await asyncio.sleep(1.0)
-
-        if not MUSIC_AUTO_FALLBACK:
-            raise RuntimeError(f"Unable to connect to {channel.name} as it exceeded the timeout of 60.0 seconds.")
-
-        print(f"[music-backend] lavalink 연결 실패 → direct 폴백: {last_error}", flush=True)
-        set_active_music_backend("direct", f"lavalink 연결 실패: {last_error}")
-        player = await _connect_direct_voice(ctx, channel)
-    else:
-        player = await _connect_direct_voice(ctx, channel)
-
-    state = get_music_state(ctx.guild.id)
-    state["last_voice_channel_id"] = channel.id
-    state["last_text_channel_id"] = ctx.channel.id
-    save_music_data()
-    return player
-
-
-def _direct_after_play(guild_id: int, error):
-    try:
-        asyncio.run_coroutine_threadsafe(handle_direct_track_end(guild_id, error), bot.loop)
-    except Exception as e:
-        print(f"[direct] after callback 실패: {e}", flush=True)
-
-
-async def handle_direct_track_end(guild_id: int, error=None):
-    if error:
-        print(f"[direct] 재생 종료 콜백 오류: {error}", flush=True)
-
-    state = get_music_state(guild_id)
-    current = state.get("current")
-    if current:
-        if state.get("repeat"):
-            queue = get_guild_queue(guild_id)
-            queue.insert(0, make_queue_item(state.get("last_text_channel_id"), current["query"]))
-        else:
-            state["history"].append(current["query"])
-
-    state["current"] = None
-    save_music_data()
-
-    if error:
-        await send_music_message(guild_id, "⚠️ 재생 중 오류가 발생해서 다음 곡으로 넘어갈게")
-    await play_next(guild_id)
-
-
-async def search_lavalink_track(query: str):
-    candidates = build_query_candidates(query)
-    last_error = None
-    query_norm = normalize_song_text(query)
-
-    def track_score(track):
-        title = normalize_song_text(getattr(track, "title", ""))
-        author = normalize_song_text(getattr(track, "author", ""))
-        score = 0
-        if query_norm and query_norm in title:
-            score += 15
-        artist, song_title = extract_artist_title(query)
-        if artist:
-            artist_norm = normalize_song_text(artist)
-            title_norm = normalize_song_text(song_title)
-            if artist_norm in title or artist_norm in author:
-                score += 10
-            if title_norm and title_norm in title:
-                score += 10
-        for word in POSITIVE_TITLE_KEYWORDS:
-            if word in title:
-                score += 2
-        for word in NEGATIVE_TITLE_KEYWORDS:
-            if word in title:
-                score -= 5
-        return score
-
-    for candidate in candidates:
-        target = candidate
-        if not target.startswith(("http://", "https://", "ytsearch:", "ytmsearch:", "scsearch:")):
-            target = f"ytsearch:{target}"
-
-        try:
-            result = await wavelink.Playable.search(target)
-        except Exception as e:
-            last_error = e
-            continue
-
-        tracks = getattr(result, "tracks", result)
-        try:
-            tracks = list(tracks)
-        except Exception:
-            tracks = []
-
-        if tracks:
-            tracks.sort(key=track_score, reverse=True)
-            return tracks[0], candidate
-
-    if last_error is not None:
-        raise ValueError(f"Lavalink 검색 실패: {last_error}")
-    raise ValueError("검색 결과가 없습니다.")
-
 RESTARTING = False
 
 schedule = []
@@ -470,9 +53,6 @@ user_colors = {}
 sent_alerts = set()
 schedule_task_started = False
 slash_sync_done = False
-
-music_queues = {}
-music_states = {}
 
 # =========================
 # 색상 설정
@@ -491,7 +71,6 @@ PASTEL_COLORS = {
 }
 DEFAULT_COLOR = PASTEL_COLORS["pastel_blue"]["rgb"]
 
-
 SCHEDULE_CATEGORY_LABELS = {
     "personal": "개인일정",
     "birthday": "생일일정",
@@ -509,15 +88,12 @@ HOLIDAY_COLOR = (235, 92, 92)
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 WEEKDAY_MAP = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
 
-
 HOLIDAY_API_KEY = os.getenv("KOREA_HOLIDAY_API_KEY") or os.getenv("DATA_GO_KR_SERVICE_KEY")
 HOLIDAY_CACHE_DIR = os.path.join(DATA_DIR, "holiday_cache")
 os.makedirs(HOLIDAY_CACHE_DIR, exist_ok=True)
 
-
 def _holiday_cache_path(year: int, month: int) -> str:
     return os.path.join(HOLIDAY_CACHE_DIR, f"{year:04d}_{month:02d}.json")
-
 
 def _load_holiday_cache(year: int, month: int):
     cache_path = _holiday_cache_path(year, month)
@@ -530,7 +106,6 @@ def _load_holiday_cache(year: int, month: int):
     except Exception:
         return None
 
-
 def _save_holiday_cache(year: int, month: int, holiday_map: dict):
     cache_path = _holiday_cache_path(year, month)
     try:
@@ -539,7 +114,6 @@ def _save_holiday_cache(year: int, month: int, holiday_map: dict):
     except Exception as e:
         print(f"[공휴일 캐시 저장 실패] {e}")
 
-
 def _add_holiday_name(target: dict, day: int, name: str):
     if day <= 0:
         return
@@ -547,12 +121,10 @@ def _add_holiday_name(target: dict, day: int, name: str):
     if name not in target[day]:
         target[day].append(name)
 
-
 def _merge_holiday_map(base_map: dict, extra_map: dict):
     for day, names in extra_map.items():
         for name in names:
             _add_holiday_name(base_map, int(day), name)
-
 
 def lunar_to_solar_date(year: int, lunar_month: int, lunar_day: int, is_leap: bool = False):
     if not LUNAR_AVAILABLE:
@@ -564,7 +136,6 @@ def lunar_to_solar_date(year: int, lunar_month: int, lunar_day: int, is_leap: bo
     except Exception as e:
         print(f"[음력 변환 실패] {e}")
         return None
-
 
 def build_local_holiday_map(year: int, month: int):
     holiday_map = {}
@@ -640,7 +211,6 @@ def build_local_holiday_map(year: int, month: int):
 
     return holiday_map
 
-
 def fetch_holiday_map_from_api(year: int, month: int):
     if not HOLIDAY_API_KEY:
         return None
@@ -673,7 +243,6 @@ def fetch_holiday_map_from_api(year: int, month: int):
         print(f"[공휴일 API 실패] {e}")
         return None
 
-
 def get_month_holidays(year: int, month: int):
     cached = _load_holiday_cache(year, month)
     if cached:
@@ -691,7 +260,6 @@ def get_month_holidays(year: int, month: int):
         if item.get("category") == "temp_holiday":
             _add_holiday_name(holiday_map, dt.day, item.get("text", "임시공휴일"))
     return holiday_map
-
 
 def normalize_schedule_date(date_text: str) -> str:
     raw = str(date_text or "").strip()
@@ -718,7 +286,6 @@ def normalize_schedule_date(date_text: str) -> str:
     except ValueError:
         raise ValueError("날짜를 다시 확인해줘")
     return normalized.strftime("%Y-%m-%d")
-
 
 def normalize_schedule_time(time_text: str) -> str:
     raw = str(time_text or "").strip()
@@ -757,8 +324,6 @@ def normalize_schedule_time(time_text: str) -> str:
         raise ValueError("시간을 다시 확인해줘")
     return f"{hour:02d}:{minute:02d}"
 
-
-
 def parse_schedule_datetime(dt_str: str):
     if not dt_str:
         return None
@@ -769,7 +334,6 @@ def parse_schedule_datetime(dt_str: str):
         except ValueError:
             continue
     return None
-
 
 def normalize_schedule_category(value: str) -> str:
     raw = str(value or "").strip().lower()
@@ -783,17 +347,12 @@ def normalize_schedule_category(value: str) -> str:
     }
     return mapping.get(raw, "personal")
 
-
-
 def normalize_repeat_input(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "").strip())
-
 
 def needs_weekday_selection(value: str) -> bool:
     normalized = normalize_repeat_input(value).lower()
     return normalized in {"요일반복", "주간반복", "weekly"}
-
-
 
 def build_schedule_item_from_values(normalized_date: str, normalized_time: str, text_value: str, user, channel_id: int, category_value: str, repeat_type: str = "none", repeat_days=None):
     if repeat_days is None:
@@ -845,7 +404,6 @@ def parse_repeat_rule(value: str):
         return "weekly", sorted(set(days))
     return "none", []
 
-
 def repeat_rule_to_text(item: dict) -> str:
     repeat_type = item.get("repeat_type", "none")
     repeat_days = item.get("repeat_days", [])
@@ -860,7 +418,6 @@ def repeat_rule_to_text(item: dict) -> str:
         return "요일반복(" + ",".join(labels) + ")" if labels else "요일반복"
     return "반복없음"
 
-
 def resolve_schedule_color(item: dict):
     category = item.get("category", "personal")
     if category == "personal":
@@ -873,10 +430,8 @@ def resolve_schedule_color(item: dict):
         return tuple(fixed)
     return tuple(DEFAULT_COLOR)
 
-
 def get_schedule_category_label(item: dict) -> str:
     return SCHEDULE_CATEGORY_LABELS.get(item.get("category", "personal"), "개인일정")
-
 
 def schedule_occurs_on_date(item: dict, target_date):
     dt = parse_schedule_datetime(item.get("datetime", ""))
@@ -897,7 +452,6 @@ def schedule_occurs_on_date(item: dict, target_date):
         return target_date.weekday() in repeat_days
     return base_date == target_date
 
-
 def format_schedule_detail(item: dict, index: int | None = None) -> str:
     parts = []
     if index is not None:
@@ -911,7 +465,6 @@ def format_schedule_detail(item: dict, index: int | None = None) -> str:
         f"알림: {'켜짐' if item.get('alert_enabled') else '꺼짐'}",
     ])
     return "\n".join(parts)
-
 
 def find_matching_schedules(keyword: str):
     keyword = str(keyword or "").strip().lower()
@@ -943,486 +496,11 @@ def find_matching_schedules(keyword: str):
     return results
 
 # =========================
-# 음악 설정
-# =========================
-FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn -loglevel panic -bufsize 64k"
-}
-
-
-def resolve_cookie_file():
-    if not YTDLP_USE_COOKIES:
-        return None
-
-    candidates = [
-        YTDLP_COOKIE_FILE,
-        os.path.join(DATA_DIR, "cookies.txt"),
-        os.path.join(BASE_DIR, "cookies.txt"),
-    ]
-
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return path
-
-    return None
-
-
-
-class QuietYTDLPLogger:
-    def debug(self, msg):
-        lowered = str(msg).lower()
-        noisy_keywords = [
-            "sign in to confirm",
-            "requested format is not available",
-            "downloading webpage",
-            "downloading player",
-            "extracting url",
-        ]
-        if any(keyword in lowered for keyword in noisy_keywords):
-            return
-        print(msg)
-
-    def warning(self, msg):
-        lowered = str(msg).lower()
-        noisy_keywords = [
-            "sign in to confirm",
-            "requested format is not available",
-            "player response",
-            "unable to download webpage",
-        ]
-        if any(keyword in lowered for keyword in noisy_keywords):
-            return
-        print(msg)
-
-    def error(self, msg):
-        lowered = str(msg).lower()
-        noisy_keywords = [
-            "sign in to confirm",
-            "requested format is not available",
-        ]
-        if any(keyword in lowered for keyword in noisy_keywords):
-            return
-        print(msg)
-
-
-YTDL_OPTIONS = {
-    "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "ytsearch5",
-    "skip_download": True,
-    "retries": int(os.getenv("YTDLP_MAX_RETRIES", "2")),
-    "fragment_retries": int(os.getenv("YTDLP_MAX_RETRIES", "2")),
-    "socket_timeout": int(os.getenv("YTDLP_TIMEOUT", "10")),
-    "nocheckcertificate": True,
-    "geo_bypass": True,
-    "youtube_include_dash_manifest": False,
-    "youtube_include_hls_manifest": False,
-    "http_headers": {
-        "User-Agent": YTDLP_USER_AGENT,
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-    },
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android"] if not YTDLP_USE_COOKIES else (["android", "ios", "mweb"] if YTDLP_DISABLE_WEB_CLIENT else ["android", "ios", "mweb", "web_creator", "web"]),
-            "player_skip": ["webpage", "configs"]
-        }
-    },
-    "logger": QuietYTDLPLogger(),
-}
-if YTDLP_FORCE_IPV4:
-    YTDL_OPTIONS["source_address"] = "0.0.0.0"
-
-
-def create_ytdl():
-
-    options = dict(YTDL_OPTIONS)
-    cookie_file = resolve_cookie_file()
-    if cookie_file:
-        options["cookiefile"] = cookie_file
-    return yt_dlp.YoutubeDL(options)
-
-
-def is_blocked_music_error(error_text: str) -> bool:
-    lowered = error_text.lower()
-    blocked_keywords = [
-        "429",
-        "too many requests",
-        "sign in to confirm",
-        "not a bot",
-        "confirm you're not a bot",
-        "use --cookies-from-browser",
-        "video unavailable",
-        "requested format is not available",
-        "unable to download api page",
-        "precondition check failed",
-        "this content isn't available",
-        "signature solving failed",
-        "only images are available for download",
-        "failed to extract any player response",
-        "unable to fetch gvs po token"
-    ]
-    return any(keyword in lowered for keyword in blocked_keywords)
-
-
-def sanitize_music_error(error: Exception) -> str:
-    error_text = str(error)
-    if is_blocked_music_error(error_text):
-        if resolve_cookie_file():
-            return "❌ 유튜브 요청 제한에 걸렸어... 잠시 후 다시 시도해줘!"
-        return "❌ 유튜브 요청 제한에 걸렸어. cookies.txt를 넣어주면 훨씬 안정적으로 재생할 수 있어!"
-    lowered = error_text.lower()
-    if "no results" in lowered or "not found" in lowered:
-        return "❌ 검색 결과를 찾지 못했어. 가수명이나 곡명을 더 정확하게 입력해줘!"
-    return "❌ 노래를 재생할 수 없어. 다른 노래로 시도해줘!"
-
-
-
-POPULAR_SONG_HINTS = {
-    "아이유": ["아이유 좋은날", "아이유 밤편지", "아이유 blueming", "아이유 라일락"],
-    "iu": ["IU Good Day", "IU Through the Night", "IU Blueming", "IU LILAC"],
-    "뉴진스": ["NewJeans Hype Boy", "NewJeans Ditto", "NewJeans Super Shy", "NewJeans Attention"],
-    "newjeans": ["NewJeans Hype Boy", "NewJeans Ditto", "NewJeans Super Shy", "NewJeans Attention"],
-    "아이브": ["IVE I AM", "IVE LOVE DIVE", "IVE After LIKE", "IVE 해야"],
-    "ive": ["IVE I AM", "IVE LOVE DIVE", "IVE After LIKE", "IVE 해야"],
-    "방탄소년단": ["BTS Dynamite", "BTS 봄날", "BTS Butter", "BTS 작은 것들을 위한 시"],
-    "bts": ["BTS Dynamite", "BTS Spring Day", "BTS Butter", "BTS Boy With Luv"],
-    "블랙핑크": ["BLACKPINK How You Like That", "BLACKPINK Pink Venom", "BLACKPINK Shut Down"],
-    "blackpink": ["BLACKPINK How You Like That", "BLACKPINK Pink Venom", "BLACKPINK Shut Down"],
-    "에스파": ["aespa Supernova", "aespa Drama", "aespa Next Level"],
-    "aespa": ["aespa Supernova", "aespa Drama", "aespa Next Level"],
-}
-
-NEGATIVE_TITLE_KEYWORDS = [
-    "cover", "karaoke", "mr", "inst", "instrumental", "reaction", "shorts",
-    "sped up", "speed up", "slowed", "reverb", "live clip", "teaser", "preview"
-]
-
-POSITIVE_TITLE_KEYWORDS = [
-    "official audio", "official", "audio", "topic", "lyrics", "mv", "music video"
-]
-
-
-def normalize_song_text(text_value: str) -> str:
-    return " ".join((text_value or "").strip().lower().split())
-
-
-def guess_artist_song_candidates(query: str):
-    normalized = normalize_song_text(query)
-    candidates = []
-
-    for artist_key, songs in POPULAR_SONG_HINTS.items():
-        if normalized == artist_key or normalized == f"{artist_key} 노래" or normalized == f"{artist_key} 노래 추천":
-            candidates.extend(songs)
-            break
-
-    if not candidates and normalized.endswith(" 노래"):
-        artist = normalized[:-3].strip()
-        for artist_key, songs in POPULAR_SONG_HINTS.items():
-            if artist == artist_key:
-                candidates.extend(songs)
-                break
-
-    unique = []
-    for item in candidates:
-        if item not in unique:
-            unique.append(item)
-    return unique[:4]
-
-
-def score_entry_for_query(entry: dict, query: str) -> int:
-    title = normalize_song_text(entry.get("title", ""))
-    uploader = normalize_song_text(entry.get("uploader", ""))
-    description = normalize_song_text(entry.get("description", ""))[:500]
-    query_norm = normalize_song_text(query)
-
-    score = 0
-    if query_norm and query_norm in title:
-        score += 10
-
-    artist, song_title = extract_artist_title(query)
-    if artist:
-        artist_norm = normalize_song_text(artist)
-        title_norm = normalize_song_text(song_title)
-        if artist_norm in title or artist_norm in uploader:
-            score += 12
-        if title_norm and title_norm in title:
-            score += 12
-
-    for word in POSITIVE_TITLE_KEYWORDS:
-        if word in title or word in description:
-            score += 4
-
-    for word in NEGATIVE_TITLE_KEYWORDS:
-        if word in title or word in description:
-            score -= 8
-
-    if "topic" in uploader:
-        score += 6
-
-    duration = entry.get("duration")
-    if isinstance(duration, (int, float)):
-        if 90 <= duration <= 420:
-            score += 3
-        elif duration < 45 or duration > 900:
-            score -= 6
-
-    return score
-
-
-def is_youtube_playlist_url(query: str) -> bool:
-    try:
-        parsed = urlparse(query.strip())
-        if parsed.netloc and ("youtube.com" in parsed.netloc or "youtu.be" in parsed.netloc):
-            qs = parse_qs(parsed.query)
-            return "list" in qs and not ("v" in qs and query.strip().lower().startswith("ytsearch"))
-    except Exception:
-        return False
-    return False
-
-
-async def extract_playlist_entries(query: str):
-    loop = asyncio.get_running_loop()
-
-    def extract():
-        options = dict(YTDL_OPTIONS)
-        options["extract_flat"] = True
-        options["skip_download"] = True
-        options["noplaylist"] = False
-        cookie_file = resolve_cookie_file()
-        if cookie_file:
-            options["cookiefile"] = cookie_file
-        return yt_dlp.YoutubeDL(options).extract_info(query, download=False)
-
-    data = await loop.run_in_executor(None, extract)
-    entries = []
-    if isinstance(data, dict):
-        for entry in (data.get("entries") or []):
-            if not entry:
-                continue
-            url = entry.get("url")
-            webpage_url = entry.get("webpage_url")
-            title = entry.get("title") or "제목 없음"
-            if webpage_url:
-                entries.append((title, webpage_url))
-            elif url:
-                if str(url).startswith("http"):
-                    entries.append((title, url))
-                else:
-                    entries.append((title, f"https://www.youtube.com/watch?v={url}"))
-    return entries
-
-
-
-def build_query_candidates(query: str):
-    candidates = []
-
-    def add(value: str):
-        value = (value or "").strip()
-        if value and value not in candidates:
-            candidates.append(value)
-
-    artist, title = extract_artist_title(query)
-
-    add(query)
-    add(f"ytsearch1:{query}")
-
-    if artist and title:
-        base = f"{artist} {title}".strip()
-        add(f"ytsearch1:{base} official audio")
-        add(f"ytsearch1:{base} topic")
-        add(f"{artist} - {title}")
-    else:
-        add(f"ytsearch1:{query} official audio")
-        add(f"ytsearch1:{query} topic")
-
-    guessed = guess_artist_song_candidates(query)
-    if guessed:
-        add(guessed[0])
-
-    return candidates[:4]
-
-
-def optimize_query(query: str) -> str:
-    raw = (query or "").strip()
-    if not raw:
-        return raw
-    if raw.startswith(("http://", "https://", "ytsearch:", "ytmsearch:", "scsearch:")):
-        return raw
-
-    normalized = normalize_song_text(raw)
-    if normalized.endswith(" 노래"):
-        artist_only = raw.replace("노래", "").strip()
-        if artist_only:
-            return f"{artist_only} official audio"
-
-    artist, title = extract_artist_title(raw)
-    if artist and title:
-        return f"{artist} {title} official audio"
-
-    return f"{raw} official audio"
-
-
-async def search_lavalink_track_with_retry(query: str):
-    attempts = []
-    extra_candidates = [
-        optimize_query(query),
-        f"{query} topic",
-        f"{query} lyrics",
-    ]
-
-    for candidate in build_query_candidates(query) + extra_candidates:
-        candidate = (candidate or "").strip()
-        if not candidate or candidate in attempts:
-            continue
-        attempts.append(candidate)
-        try:
-            return await search_lavalink_track(candidate)
-        except Exception:
-            continue
-
-    raise ValueError("검색 결과가 없습니다.")
-
-
-
-class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get("title")
-        self.webpage_url = data.get("webpage_url")
-        self.original_url = data.get("original_url")
-
-    @classmethod
-    async def from_query(cls, query: str):
-        loop = asyncio.get_running_loop()
-
-        def extract_once(target_query: str):
-            return create_ytdl().extract_info(target_query, download=False)
-
-        def normalize_entries(data):
-            if not data:
-                return []
-            if isinstance(data, dict) and "entries" in data:
-                return [entry for entry in (data.get("entries") or []) if entry]
-            return [data]
-
-        blocked_error_seen = False
-        last_error = None
-
-        for candidate in build_query_candidates(query):
-            try:
-                data = await loop.run_in_executor(None, lambda c=candidate: extract_once(c))
-            except Exception as e:
-                last_error = e
-                if is_blocked_music_error(str(e)):
-                    blocked_error_seen = True
-                continue
-
-            entries = normalize_entries(data)
-            if not entries:
-                continue
-
-            # 검색 품질 점수화
-            scored_entries = []
-            for entry in entries[:4]:
-                if not entry:
-                    continue
-                score = score_entry_for_query(entry, query)
-                scored_entries.append((score, entry))
-            scored_entries.sort(key=lambda item: item[0], reverse=True)
-
-            for _, entry in scored_entries[:1]:
-                current_data = entry
-                audio_url = current_data.get("url")
-
-                if not audio_url:
-                    webpage_url = current_data.get("webpage_url") or current_data.get("original_url")
-                    if webpage_url:
-                        try:
-                            current_data = await loop.run_in_executor(None, lambda u=webpage_url: extract_once(u))
-                            audio_url = current_data.get("url")
-                        except Exception as e:
-                            last_error = e
-                            if is_blocked_music_error(str(e)):
-                                blocked_error_seen = True
-                            continue
-
-                if not audio_url:
-                    continue
-
-                try:
-                    source = discord.FFmpegPCMAudio(audio_url, executable="ffmpeg", **FFMPEG_OPTIONS)
-                    return cls(source, data=current_data)
-                except Exception as e:
-                    last_error = e
-                    continue
-
-        if blocked_error_seen:
-            if resolve_cookie_file():
-                raise ValueError("유튜브 요청이 잠시 많아서 재생이 어려워. 잠깐 뒤에 다시 시도해줘.")
-            raise ValueError("유튜브 요청 제한 때문에 재생이 막혔어. cookies.txt를 넣은 뒤 다시 시도해줘.")
-        if last_error is not None:
-            raise ValueError(sanitize_music_error(last_error).replace("❌ ", ""))
-        raise ValueError("검색 결과가 없습니다.")
-
-
-
-
-def build_resolve_attempts(query: str):
-    attempts = []
-
-    def add(value: str):
-        value = (value or "").strip()
-        if value and value not in attempts:
-            attempts.append(value)
-
-    add(query)
-
-    artist, title = extract_artist_title(query)
-    if artist and title:
-        add(f"{artist} {title} official audio")
-        add(f"{artist} {title} topic")
-    else:
-        add(f"{query} official audio")
-        guessed = guess_artist_song_candidates(query)
-        if guessed:
-            add(guessed[0])
-
-    return attempts[:3]
-
-
-
-async def try_resolve_player_with_fallback(query: str):
-    attempted_queries = []
-    last_error = None
-
-    for candidate in build_resolve_attempts(query):
-        attempted_queries.append(candidate)
-        try:
-            player = await YTDLSource.from_query(candidate)
-            return player, attempted_queries
-        except Exception as e:
-            last_error = e
-            if is_blocked_music_error(str(e)):
-                break
-            continue
-
-    if last_error is not None:
-        raise last_error
-
-    player = await YTDLSource.from_query(query)
-    return player, attempted_queries or [query]
-
-# =========================
 # 파일 저장 / 불러오기
 # =========================
 def save_schedule():
     with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
         json.dump(schedule, f, ensure_ascii=False, indent=2)
-
 
 def load_schedule():
     global schedule
@@ -1432,11 +510,9 @@ def load_schedule():
     else:
         schedule = []
 
-
 def save_colors():
     with open(COLORS_FILE, "w", encoding="utf-8") as f:
         json.dump(user_colors, f, ensure_ascii=False, indent=2)
-
 
 def load_colors():
     global user_colors
@@ -1445,62 +521,6 @@ def load_colors():
             user_colors = json.load(f)
     else:
         user_colors = {}
-
-
-def save_music_data():
-    data = {}
-
-    guild_ids = set(music_states.keys()) | set(music_queues.keys())
-    for guild_id in guild_ids:
-        state = get_music_state(guild_id)
-        queue = get_guild_queue(guild_id)
-
-        current_query = None
-        if state.get("current") and state["current"].get("query"):
-            current_query = state["current"]["query"]
-
-        queue_queries = [query for _, query in queue if isinstance(query, str)]
-
-        data[str(guild_id)] = {
-            "last_query": state.get("last_query") or current_query,
-            "last_voice_channel_id": state.get("last_voice_channel_id"),
-            "repeat": state.get("repeat", False),
-            "history": [item for item in state.get("history", []) if isinstance(item, str)][-20:],
-            "current_query": current_query,
-            "queue": queue_queries,
-        }
-
-    with open(MUSIC_STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def load_music_data():
-    if not os.path.exists(MUSIC_STATE_FILE):
-        return
-
-    try:
-        with open(MUSIC_STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        print(f"music_state.json 로드 실패: {e}")
-        return
-
-    if not isinstance(data, dict):
-        return
-
-    for guild_id_text, saved in data.items():
-        try:
-            guild_id = int(guild_id_text)
-        except (TypeError, ValueError):
-            continue
-
-        state = get_music_state(guild_id)
-        state["last_query"] = saved.get("last_query") or saved.get("current_query")
-        state["last_voice_channel_id"] = saved.get("last_voice_channel_id")
-        state["repeat"] = bool(saved.get("repeat", False))
-        state["history"] = [item for item in saved.get("history", []) if isinstance(item, str)][-20:]
-        state["restored_queue"] = [item for item in saved.get("queue", []) if isinstance(item, str)]
-
 
 # =========================
 # 공통 유틸
@@ -1514,7 +534,6 @@ def resolve_font_path():
         if candidate and os.path.isfile(candidate):
             return candidate
     return None
-
 
 def get_font(size: int):
     global FONT_LOGGED
@@ -1534,19 +553,16 @@ def get_font(size: int):
 def safe_text(text: str, limit: int):
     return text if len(text) <= limit else text[:limit]
 
-
 def split_text(text: str, size: int = 1900):
     if not text:
         return ["내용 없음"]
     return [text[i:i + size] for i in range(0, len(text), size)]
-
 
 def extract_artist_title(song: str):
     if " - " in song:
         artist, title = song.split(" - ", 1)
         return artist.strip(), title.strip()
     return None, song.strip()
-
 
 def get_month_schedule_map(year: int, month: int):
     date_map = {}
@@ -1558,54 +574,6 @@ def get_month_schedule_map(year: int, month: int):
             items.sort(key=lambda entry: (parse_schedule_datetime(entry.get("datetime", "")) or datetime.max).time())
             date_map[day] = items
     return date_map
-
-
-def get_guild_queue(guild_id: int):
-    if guild_id not in music_queues:
-        music_queues[guild_id] = []
-    return music_queues[guild_id]
-
-
-def get_music_state(guild_id: int):
-    if guild_id not in music_states:
-        music_states[guild_id] = {
-            "current": None,
-            "repeat": False,
-            "history": [],
-            "last_query": None,
-            "last_voice_channel_id": None,
-            "restored_queue": [],
-            "fail_count": 0,
-            "blocked_fail_count": 0,
-            "auto_skipped_count": 0
-        }
-    return music_states[guild_id]
-
-
-async def send_queue_list(channel, guild_id: int):
-    queue = get_guild_queue(guild_id)
-    state = get_music_state(guild_id)
-
-    lines = []
-
-    if state["current"]:
-        lines.append(f"🎵 현재곡: {state['current']['title']}")
-    else:
-        lines.append("🎵 현재 재생 중인 곡 없음")
-
-    lines.append("")
-
-    if queue:
-        lines.append("📜 대기열")
-        for i, (_, query) in enumerate(queue, start=1):
-            lines.append(f"{i}. {query}")
-    else:
-        lines.append("📜 대기열 비어 있음")
-
-    text = "\n".join(lines)
-    for chunk in split_text(text, 1800):
-        await channel.send(f"```{chunk}```")
-
 
 async def send_schedule_list_message(target):
     if not schedule:
@@ -1620,7 +588,6 @@ async def send_schedule_list_message(target):
     text = "\n".join(lines)
     for chunk in split_text(text, 1800):
         await target.send(f"```{chunk}```")
-
 
 # =========================
 # 일정 알림 체크
@@ -1698,171 +665,6 @@ async def check_schedule():
                         sent_alerts.add(before_key)
 
         await asyncio.sleep(30)
-
-
-# =========================
-# 음악 재생
-# =========================
-async def verify_lavalink_playback_and_fallback(guild_id: int, query: str):
-    await asyncio.sleep(3)
-
-    guild = bot.get_guild(guild_id)
-    if guild is None:
-        return
-
-    player = guild.voice_client if isinstance(guild.voice_client, wavelink.Player) else None
-    if player is None or not use_lavalink_backend():
-        return
-
-    try:
-        playing = player_is_playing(player)
-    except Exception:
-        playing = False
-
-    position = 0
-    try:
-        position = int(getattr(player, "position", 0) or 0)
-    except Exception:
-        position = 0
-
-    if playing and position > 0:
-        return
-
-    print(f"[music-backend] Lavalink 재생 확인 실패 -> direct 폴백 | playing={playing} position={position}", flush=True)
-
-    state = get_music_state(guild_id)
-    queue = get_guild_queue(guild_id)
-    queue.insert(0, make_queue_item(state.get("last_text_channel_id"), query))
-    state["current"] = None
-    save_music_data()
-
-    try:
-        await player.disconnect()
-    except Exception as e:
-        print(f"[music-backend] lavalink disconnect 실패: {e}", flush=True)
-
-    set_active_music_backend("direct", "lavalink 무음/미재생 폴백")
-    await send_music_message(guild_id, "⚠️ Lavalink 재생 확인이 안 돼서 Direct로 자동 전환할게")
-    await play_next(guild_id)
-
-
-async def play_next(guild_id: int):
-    queue = get_guild_queue(guild_id)
-    state = get_music_state(guild_id)
-    guild = bot.get_guild(guild_id)
-
-    if guild is None:
-        state["current"] = None
-        save_music_data()
-        return
-
-    voice_client = guild.voice_client
-
-    if not queue:
-        state["current"] = None
-        save_music_data()
-        return
-
-    channel_id, query = unpack_queue_item(queue.pop(0))
-    if channel_id:
-        state["last_text_channel_id"] = channel_id
-
-    if voice_client is None:
-        state["current"] = None
-        save_music_data()
-        await send_music_message(guild_id, "❌ 음성 채널 연결이 끊어졌어. 다시 /입장 후 /재생 해줘")
-        return
-
-    try:
-        if isinstance(voice_client, wavelink.Player) and use_lavalink_backend():
-            track, matched_query = await search_lavalink_track_with_retry(query)
-
-            state["current"] = {
-                "title": getattr(track, "title", query),
-                "query": query,
-                "url": getattr(track, "uri", None)
-            }
-            state["last_query"] = query
-            state["fail_count"] = 0
-            if getattr(voice_client, "channel", None):
-                state["last_voice_channel_id"] = voice_client.channel.id
-            state["restored_queue"] = [saved_query for _, saved_query in (unpack_queue_item(item) for item in queue) if isinstance(saved_query, str)]
-            save_music_data()
-
-            await voice_client.play(track)
-            try:
-                set_volume = getattr(voice_client, "set_volume", None)
-                if callable(set_volume):
-                    await set_volume(100)
-            except Exception as e:
-                print(f"[music-backend] 재생 후 lavalink 볼륨 설정 실패: {e}", flush=True)
-
-            extra_line = ""
-            if matched_query != query:
-                extra_line = f"\n검색 보정: `{matched_query}`"
-
-            await send_music_message(
-                guild_id,
-                f"🎵 재생 중: **{getattr(track, 'title', query)}**\n대기열: {len(queue)}곡\n백엔드: Lavalink{extra_line}",
-                view=MusicView(guild_id)
-            )
-            asyncio.create_task(verify_lavalink_playback_and_fallback(guild_id, query))
-            return
-
-        source, attempted_queries = await try_resolve_player_with_fallback(query)
-
-        state["current"] = {
-            "title": getattr(source, "title", query) or query,
-            "query": query,
-            "url": getattr(source, "webpage_url", None) or getattr(source, "original_url", None)
-        }
-        state["last_query"] = query
-        state["fail_count"] = 0
-        if getattr(voice_client, "channel", None):
-            state["last_voice_channel_id"] = voice_client.channel.id
-        state["restored_queue"] = [saved_query for _, saved_query in (unpack_queue_item(item) for item in queue) if isinstance(saved_query, str)]
-        save_music_data()
-
-        if isinstance(voice_client, wavelink.Player):
-            try:
-                await voice_client.disconnect()
-            except Exception:
-                pass
-            await send_music_message(guild_id, "⚠️ Lavalink 대신 direct 재생으로 전환할게")
-            return await play_next(guild_id)
-
-        voice_client.play(source, after=lambda err: _direct_after_play(guild_id, err))
-
-        search_hint = ""
-        if attempted_queries and attempted_queries[0] != query:
-            search_hint = f"\n검색 보정: `{attempted_queries[0]}`"
-
-        await send_music_message(
-            guild_id,
-            f"🎵 재생 중: **{getattr(source, 'title', query) or query}**\n대기열: {len(queue)}곡\n백엔드: Direct{search_hint}",
-            view=MusicView(guild_id)
-        )
-
-    except Exception as e:
-        error_text = str(e)
-        print(f"곡 재생 실패, 자동 스킵: {query} | {error_text}")
-
-        if use_lavalink_backend() and MUSIC_AUTO_FALLBACK:
-            print(f"[music-backend] 재생 실패 → direct 폴백: {error_text}", flush=True)
-            set_active_music_backend("direct", f"재생 실패: {error_text}")
-
-        state["fail_count"] = state.get("fail_count", 0) + 1
-        state["auto_skipped_count"] = state.get("auto_skipped_count", 0) + 1
-        state["current"] = None
-        save_music_data()
-
-        if queue:
-            await send_music_message(guild_id, f"⚠️ `{query}` 재생 실패 → 자동으로 다음 곡으로 넘어갈게")
-            await asyncio.sleep(1)
-            await play_next(guild_id)
-        else:
-            await send_music_message(guild_id, f"⚠️ `{query}` 재생 실패했고, 다음 곡이 없어서 정지할게")
-
 
 # =========================
 # 캘린더 이미지 생성
@@ -2000,7 +802,6 @@ def create_calendar_image(year: int, month: int):
     image.save(output_file)
     return output_file
 
-
 # =========================
 # 도움말 UI
 # =========================
@@ -2028,7 +829,6 @@ class HelpView(discord.ui.View):
         text = build_tts_help_text()
         await interaction.response.send_message(text, ephemeral=True)
 
-
 class HelpButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
@@ -2047,7 +847,6 @@ class HelpButton(discord.ui.Button):
         )
         await interaction.response.send_message(text, ephemeral=True)
 
-
 class ScheduleHelpButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
@@ -2065,7 +864,6 @@ class ScheduleHelpButton(discord.ui.Button):
             "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n\n"
         )
         await interaction.response.send_message(text, ephemeral=True)
-
 
 class ScheduleListButton(discord.ui.Button):
     def __init__(self):
@@ -2087,7 +885,6 @@ class ScheduleListButton(discord.ui.Button):
         await interaction.response.send_message(f"```{chunks[0]}```", ephemeral=True)
         for chunk in chunks[1:]:
             await interaction.followup.send(f"```{chunk}```", ephemeral=True)
-
 
 # =========================
 # 색상 UI
@@ -2115,7 +912,6 @@ class ColorSelect(discord.ui.Select):
         save_colors()
         await interaction.response.send_message(f"🎨 색 설정 완료: {PASTEL_COLORS[selected_key]['label']}", ephemeral=True)
 
-
 class ColorButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="🎨 색 선택", style=discord.ButtonStyle.secondary, row=0)
@@ -2124,7 +920,6 @@ class ColorButton(discord.ui.Button):
         view = discord.ui.View()
         view.add_item(ColorSelect())
         await interaction.response.send_message("색을 보고 골라줘", view=view, ephemeral=True)
-
 
 # =========================
 # 모달 UI
@@ -2181,7 +976,6 @@ class AddScheduleModal(discord.ui.Modal, title="일정 등록"):
             f"✅ 일정 등록 완료\n종류: {category_label}\n반복: {repeat_label}\n새로 /캘린더 입력하면 반영돼",
             ephemeral=True
         )
-
 
 class WeekdayScheduleModal(discord.ui.Modal, title="요일 선택 일정 등록"):
     date = discord.ui.TextInput(label="날짜", placeholder="2026-03-25 또는 20260325")
@@ -2323,32 +1117,6 @@ class AddScheduleChoiceView(discord.ui.View):
     async def weekday_add(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(WeekdayScheduleModal())
 
-class AddSongModal(discord.ui.Modal, title="노래 추가"):
-    song = discord.ui.TextInput(label="노래 제목 또는 URL", placeholder="예: 아이유 밤편지 / 유튜브 링크")
-
-    def __init__(self, guild_id: int, channel_id: int):
-        super().__init__()
-        self.guild_id = guild_id
-        self.channel_id = channel_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        queue = get_guild_queue(self.guild_id)
-        queue.append(make_queue_item(self.channel_id, self.song.value))
-        state = get_music_state(self.guild_id)
-        state["last_query"] = self.song.value
-        state["last_text_channel_id"] = self.channel_id
-        save_music_data()
-
-        guild = bot.get_guild(self.guild_id)
-        player = guild.voice_client if guild and isinstance(guild.voice_client, wavelink.Player) else None
-
-        if player and (player_is_playing(player) or player_is_paused(player)):
-            await interaction.response.send_message(f"🎶 대기열 추가됨: {self.song.value}", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"▶️ 바로 재생 시도: {self.song.value}", ephemeral=True)
-            await play_next(self.guild_id)
-
-
 class ScheduleSelect(discord.ui.Select):
 
     def __init__(self, action_type: str):
@@ -2393,56 +1161,10 @@ class ScheduleSelect(discord.ui.Select):
             save_schedule()
             await interaction.response.send_message(f"🔕 알림 삭제 완료: {schedule[idx]['datetime']} / {schedule[idx]['text']}", ephemeral=True)
 
-
-class MusicDeleteSelect(discord.ui.Select):
-    def __init__(self, guild_id: int):
-        self.guild_id = guild_id
-        queue = get_guild_queue(guild_id)
-
-        options = []
-        for i, (_, query) in enumerate(queue[:25]):
-            options.append(
-                discord.SelectOption(
-                    label=safe_text(query, 100),
-                    value=str(i),
-                    description=f"{i + 1}번 대기곡"
-                )
-            )
-
-        if not options:
-            options.append(discord.SelectOption(label="삭제할 곡 없음", value="none", description="대기열이 비어 있음"))
-
-        super().__init__(placeholder="삭제할 노래를 골라줘", options=options, min_values=1, max_values=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        if self.values[0] == "none":
-            await interaction.response.send_message("삭제할 노래가 없어", ephemeral=True)
-            return
-
-        queue = get_guild_queue(self.guild_id)
-        idx = int(self.values[0])
-
-        if idx < 0 or idx >= len(queue):
-            await interaction.response.send_message("잘못된 선택이야", ephemeral=True)
-            return
-
-        _, removed_query = queue.pop(idx)
-        save_music_data()
-        await interaction.response.send_message(f"🗑️ 대기열에서 삭제 완료: {removed_query}", ephemeral=True)
-
-
 class ScheduleSelectView(discord.ui.View):
     def __init__(self, action_type: str):
         super().__init__(timeout=60)
         self.add_item(ScheduleSelect(action_type))
-
-
-class MusicDeleteView(discord.ui.View):
-    def __init__(self, guild_id: int):
-        super().__init__(timeout=60)
-        self.add_item(MusicDeleteSelect(guild_id))
-
-
 
 class GoToMonthModal(discord.ui.Modal, title="월 이동"):
     year_input = discord.ui.TextInput(label="연도", placeholder="2026")
@@ -2462,14 +1184,12 @@ class GoToMonthModal(discord.ui.Modal, title="월 이동"):
         file_path = await asyncio.to_thread(create_calendar_image, year, month)
         await interaction.message.edit(attachments=[discord.File(file_path)], view=FinalCalendarView(year, month))
 
-
 class GoToMonthButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="📅 월이동", style=discord.ButtonStyle.secondary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(GoToMonthModal())
-
 
 class ScheduleSearchModal(discord.ui.Modal, title="일정 검색"):
     keyword = discord.ui.TextInput(
@@ -2490,14 +1210,12 @@ class ScheduleSearchModal(discord.ui.Modal, title="일정 검색"):
 
         await interaction.response.send_message("```" + "\n".join(lines).strip() + "```", ephemeral=True)
 
-
 class ScheduleSearchButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="🔎 일정검색", style=discord.ButtonStyle.secondary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ScheduleSearchModal())
-
 
 class ScheduleViewSelect(discord.ui.Select):
     def __init__(self):
@@ -2519,12 +1237,10 @@ class ScheduleViewSelect(discord.ui.Select):
         idx = int(self.values[0])
         await interaction.response.send_message("```" + format_schedule_detail(schedule[idx], idx) + "```", ephemeral=True)
 
-
 class ScheduleViewSelectView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=60)
         self.add_item(ScheduleViewSelect())
-
 
 class ScheduleViewButton(discord.ui.Button):
     def __init__(self):
@@ -2536,14 +1252,12 @@ class ScheduleViewButton(discord.ui.Button):
             return
         await interaction.response.send_message("확인할 일정을 골라줘", view=ScheduleViewSelectView(), ephemeral=True)
 
-
 class AddScheduleButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="➕ 일정등록", style=discord.ButtonStyle.success, row=1)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AddScheduleModal())
-
 
 class DeleteScheduleButton(discord.ui.Button):
     def __init__(self):
@@ -2555,7 +1269,6 @@ class DeleteScheduleButton(discord.ui.Button):
             return
         await interaction.response.send_message("삭제할 일정을 골라줘", view=ScheduleSelectView("delete"), ephemeral=True)
 
-
 class AddAlertButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="🔔 알림등록", style=discord.ButtonStyle.primary, row=1)
@@ -2566,7 +1279,6 @@ class AddAlertButton(discord.ui.Button):
             return
         await interaction.response.send_message("알림 등록할 일정을 골라줘", view=ScheduleSelectView("add_alert"), ephemeral=True)
 
-
 class DeleteAlertButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="🔕 알림삭제", style=discord.ButtonStyle.secondary, row=1)
@@ -2576,7 +1288,6 @@ class DeleteAlertButton(discord.ui.Button):
             await interaction.response.send_message("등록된 일정이 없어", ephemeral=True)
             return
         await interaction.response.send_message("알림 삭제할 일정을 골라줘", view=ScheduleSelectView("delete_alert"), ephemeral=True)
-
 
 class CalendarOptionView(discord.ui.View):
     def __init__(self):
@@ -2589,14 +1300,12 @@ class CalendarOptionView(discord.ui.View):
         self.add_item(AddAlertButton())
         self.add_item(DeleteAlertButton())
 
-
 class OptionButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="⚙ 옵션", style=discord.ButtonStyle.secondary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_message("원하는 기능을 골라줘", view=CalendarOptionView(), ephemeral=True)
-
 
 class FinalCalendarView(discord.ui.View):
     def __init__(self, year, month):
@@ -2690,194 +1399,6 @@ class CalendarView(discord.ui.View):
 
         await interaction.response.send_message("🔕 알림 삭제할 일정을 골라줘", view=ScheduleSelectView("delete_alert"), ephemeral=True)
 
-
-# =========================
-# 음악 UI
-# =========================
-
-class MusicView(discord.ui.View):
-    def __init__(self, guild_id: int):
-        super().__init__(timeout=3600)
-        self.guild_id = guild_id
-
-    def get_player(self):
-        guild = bot.get_guild(self.guild_id)
-        if guild and isinstance(guild.voice_client, wavelink.Player):
-            return guild.voice_client
-        return None
-
-    @discord.ui.button(label="⏮ 이전곡", style=discord.ButtonStyle.secondary, row=0)
-    async def prev_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        state = get_music_state(self.guild_id)
-        queue = get_guild_queue(self.guild_id)
-        player = self.get_player()
-
-        if not state["history"]:
-            await interaction.response.send_message("이전곡이 없어", ephemeral=True)
-            return
-
-        prev_query = state["history"].pop()
-        queue.insert(0, make_queue_item(interaction.channel_id, prev_query))
-        state["last_text_channel_id"] = interaction.channel_id
-        save_music_data()
-
-        if player:
-            await player.stop()
-            await interaction.response.send_message(f"⏮ 이전곡으로 이동: {prev_query}", ephemeral=True)
-        else:
-            await interaction.response.send_message("음성 채널에 없어", ephemeral=True)
-
-    @discord.ui.button(label="⏭ 다음곡", style=discord.ButtonStyle.secondary, row=0)
-    async def next_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        queue = get_guild_queue(self.guild_id)
-        player = self.get_player()
-
-        if not queue:
-            await interaction.response.send_message("다음곡이 없어", ephemeral=True)
-            return
-
-        if player:
-            state = get_music_state(self.guild_id)
-            state["last_text_channel_id"] = interaction.channel_id
-            save_music_data()
-            await player.stop()
-            await interaction.response.send_message("⏭ 다음곡으로 넘어갈게", ephemeral=True)
-        else:
-            await interaction.response.send_message("음성 채널에 없음", ephemeral=True)
-
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.primary, row=0)
-    async def toggle_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
-        player = self.get_player()
-        if player is None:
-            await interaction.response.send_message("음성 채널에 없어", ephemeral=True)
-            return
-
-        if player_is_playing(player):
-            await player.pause(True)
-            await interaction.response.send_message("⏸️ 일시정지", ephemeral=True)
-        elif player_is_paused(player):
-            await player.pause(False)
-            await interaction.response.send_message("▶️ 다시 재생", ephemeral=True)
-        else:
-            await interaction.response.send_message("현재 재생 중인 노래가 없어", ephemeral=True)
-
-    @discord.ui.button(label="⏹", style=discord.ButtonStyle.danger, row=0)
-    async def stop_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        music_queues[self.guild_id] = []
-        state = get_music_state(self.guild_id)
-        state["current"] = None
-        state["restored_queue"] = []
-        state["last_text_channel_id"] = interaction.channel_id
-        save_music_data()
-
-        player = self.get_player()
-        if player:
-            await player.stop()
-            await interaction.response.send_message("⏹️ 정지 완료", ephemeral=True)
-        else:
-            await interaction.response.send_message("음성 채널에 없음", ephemeral=True)
-
-    @discord.ui.button(label="🔁", style=discord.ButtonStyle.success, row=0)
-    async def repeat_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        state = get_music_state(self.guild_id)
-        state["repeat"] = not state["repeat"]
-        state["last_text_channel_id"] = interaction.channel_id
-        save_music_data()
-        text = "🔁 반복 켜짐" if state["repeat"] else "➡️ 반복 꺼짐"
-        await interaction.response.send_message(text, ephemeral=True)
-
-    @discord.ui.button(label="📜 노래리스트", style=discord.ButtonStyle.secondary, row=1)
-    async def queue_list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        state = get_music_state(self.guild_id)
-        queue = get_guild_queue(self.guild_id)
-
-        lines = []
-        if state["current"]:
-            lines.append(f"🎵 현재곡: {state['current']['title']}")
-        else:
-            lines.append("🎵 현재곡 없음")
-
-        lines.append("")
-
-        if queue:
-            lines.append("📜 대기열")
-            for i, item in enumerate(queue, start=1):
-                _, query = unpack_queue_item(item)
-                lines.append(f"{i}. {query}")
-        else:
-            lines.append("📜 대기열 비어 있음")
-
-        text = "\n".join(lines)
-        chunks = split_text(text, 1800)
-
-        await interaction.response.send_message(f"```{chunks[0]}```", ephemeral=True)
-        for chunk in chunks[1:]:
-            await interaction.followup.send(f"```{chunk}```", ephemeral=True)
-
-    @discord.ui.button(label="📄 가사", style=discord.ButtonStyle.secondary, row=1)
-    async def lyrics_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        state = get_music_state(self.guild_id)
-        current = state["current"]
-
-        if not current:
-            await interaction.response.send_message("현재 재생 중인 곡이 없어", ephemeral=True)
-            return
-
-        song = current["title"]
-        artist, title = extract_artist_title(song)
-
-        if not artist:
-            await interaction.response.send_message(
-                f"현재곡 제목이 `{song}` 형태라서 자동 가사 검색이 어려워.\n`/가사 가수 - 제목` 형식으로 입력해줘.",
-                ephemeral=True
-            )
-            return
-
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.lyrics.ovh/v1/{artist}/{title}"
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    await interaction.response.send_message("가사를 못 찾았어", ephemeral=True)
-                    return
-                data = await resp.json()
-
-        text = data.get("lyrics", "없음")
-        chunks = split_text(text, 1800)
-
-        await interaction.response.send_message(f"📄 **{artist} - {title}**\n```{chunks[0]}```", ephemeral=True)
-        for chunk in chunks[1:]:
-            await interaction.followup.send(f"```{chunk}```", ephemeral=True)
-
-    @discord.ui.button(label="📖 도움말", style=discord.ButtonStyle.primary, row=1)
-    async def music_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        text = (
-            "🎵 노래 명령어\n\n"
-            "/입장\n"
-            "/퇴장\n"
-            "/재생 노래이름\n/재생 유튜브플레이리스트URL\n"
-            "/정지\n"
-            "/일시정지\n"
-            "/다시재생\n"
-            "/노래리스트\n/플레이리스트정보 URL\n"
-            "/가사 가수 - 제목"
-        )
-        await interaction.response.send_message(text, ephemeral=True)
-
-    @discord.ui.button(label="➕ 노래추가", style=discord.ButtonStyle.success, row=1)
-    async def add_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddSongModal(self.guild_id, interaction.channel_id))
-
-    @discord.ui.button(label="🗑 노래삭제", style=discord.ButtonStyle.danger, row=1)
-    async def remove_song_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        queue = get_guild_queue(self.guild_id)
-
-        if not queue:
-            await interaction.response.send_message("대기열이 비어 있어", ephemeral=True)
-            return
-
-        await interaction.response.send_message("삭제할 노래를 골라줘", view=MusicDeleteView(self.guild_id), ephemeral=True)
-
-
 # =========================
 # 이벤트
 # =========================
@@ -2912,22 +1433,18 @@ async def on_ready():
     except Exception as e:
         print(f"초기화 오류: {e}", flush=True)
 
-
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
     await bot.process_commands(message)
 
-
 # =========================
 # TTS 명령어
 # =========================
 
-
 TTS_TEMP_DIR = os.path.join(DATA_DIR, "tts_cache")
 os.makedirs(TTS_TEMP_DIR, exist_ok=True)
-
 
 @bot.command(name="캘린더")
 async def show_calendar(ctx, year: int = None, month: int = None):
@@ -2939,12 +1456,9 @@ async def show_calendar(ctx, year: int = None, month: int = None):
     view = FinalCalendarView(year, month)
     await ctx.send(file=discord.File(file_path), view=view)
 
-
 @bot.command(name="일정목록")
 async def list_schedule(ctx):
     await send_schedule_list_message(ctx)
-
-
 
 # =========================
 # 실행
@@ -2968,8 +1482,6 @@ class InteractionCtx:
 def _schedule_sort_key(item):
     dt = parse_schedule_datetime(item.get("datetime", "")) or datetime.max
     return (dt, item.get("text", ""))
-
-
 
 @bot.tree.command(name="캘린더", description="캘린더를 표시합니다")
 @app_commands.describe(year="연도", month="월")
@@ -3035,7 +1547,6 @@ async def slash_add_schedule(interaction: discord.Interaction, date: str, time_i
         f"✅ 일정 등록 완료\n종류: {get_schedule_category_label(item)}\n반복: {repeat_rule_to_text(item)}\n새로: /캘린더 입력하면 반영돼",
         ephemeral=True
     )
-
 
 class ScheduleEditModal(discord.ui.Modal, title="일정 수정"):
     def __init__(self, item_index: int):
@@ -3108,7 +1619,6 @@ class ScheduleEditModal(discord.ui.Modal, title="일정 수정"):
             ephemeral=True
         )
 
-
 class ScheduleEditSelect(discord.ui.Select):
     def __init__(self, matched_items: list[tuple[int, dict]]):
         options = []
@@ -3123,12 +1633,10 @@ class ScheduleEditSelect(discord.ui.Select):
         item_index = int(self.values[0])
         await interaction.response.send_modal(ScheduleEditModal(item_index))
 
-
 class ScheduleEditSelectView(discord.ui.View):
     def __init__(self, matched_items: list[tuple[int, dict]]):
         super().__init__(timeout=120)
         self.add_item(ScheduleEditSelect(matched_items))
-
 
 @bot.tree.command(name="일정수정", description="날짜를 선택한 뒤 일정을 골라 수정합니다")
 @app_commands.describe(date="수정할 일정의 날짜 (예: 2026-03-25)")
@@ -3163,14 +1671,11 @@ async def slash_edit_schedule(interaction: discord.Interaction, date: str):
         ephemeral=True
     )
 
-
 @bot.tree.command(name="일정삭제", description="등록된 일정을 삭제합니다")
 @app_commands.describe(index="삭제할 일정 번호")
 async def slash_delete_schedule(interaction: discord.Interaction, index: int):
     await interaction.response.defer(thinking=True)
     await delete_schedule_cmd(InteractionCtx(interaction), index=index)
-
-
 
 # =========================
 # TTS 자동 읽기 전용 설정
@@ -3185,17 +1690,14 @@ TTS_VOICE_CHOICES = {
     "현수": {"voice": "ko-KR-HyunSuNeural", "tone": "부드럽고 젊은 남성톤"},
 }
 
-
 def get_voice_info(label: str) -> dict:
     return TTS_VOICE_CHOICES.get(label, {"voice": "ko-KR-SunHiNeural", "tone": "밝고 부드러운 여성톤"})
-
 
 def build_voice_guide_text() -> str:
     lines = []
     for label, info in TTS_VOICE_CHOICES.items():
         lines.append(f"- {label}: {info['tone']}")
     return "\n".join(lines)
-
 
 def build_tts_help_text() -> str:
     return f"""🔊 TTS 도움말
@@ -3207,7 +1709,7 @@ def build_tts_help_text() -> str:
 설정
 /읽기채널 : 현재 채널을 읽기 채널로 설정
 /닉네임읽기 : 닉네임을 같이 읽을지 설정
-/목소리 : 한국어 이름으로 TTS 목소리 선택
+/음성 : 한국어 이름으로 TTS 목소리 선택
 /속도 : 읽는 속도 조절 (예: 0.8 ~ 1.2)
 /톤 : 목소리 높낮이 조절 (예: 0.8 ~ 1.2)
 /읽기최적화 : 메시지 길이에 따라 속도와 간격을 자동 보정
@@ -3227,22 +1729,21 @@ def build_tts_help_text() -> str:
 
 🎤 목소리 설정 추천 조합
 💗 부드러운 기본 (추천)
-→ /목소리 선하 + /속도 1.0 + /톤 1.0
+→ /음성 선하 + /속도 1.0 + /톤 1.0
 
 🧑 차분한 남성톤
-→ /목소리 인준 + /속도 0.9 + /톤 0.9
+→ /음성 인준 + /속도 0.9 + /톤 0.9
 
 ⚡ 빠르고 밝게
-→ /목소리 선하 + /속도 1.2 + /톤 1.1
+→ /음성 선하 + /속도 1.2 + /톤 1.1
 
 🎧 방송 느낌 (또박또박)
-→ /목소리 지민 + /속도 0.95 + /톤 1.0
+→ /음성 지민 + /속도 0.95 + /톤 1.0
 
 😴 느리고 안정적인 톤
-→ /목소리 서현 + /속도 0.8 + /톤 0.9
+→ /음성 서현 + /속도 0.8 + /톤 0.9
 
 💡 팁 : 속도는 0.9 ~ 1.1 사이가 가장 자연스럽고, 톤은 0.9 ~ 1.1 사이가 무난해요"""
-
 
 TTS_DEFAULT_SETTINGS = {
     "enabled": False,
@@ -3265,7 +1766,6 @@ tts_queues = {}
 tts_workers = {}
 tts_worker_locks = {}
 
-
 def load_tts_settings():
     global tts_settings
     if os.path.exists(TTS_SETTINGS_FILE):
@@ -3279,14 +1779,12 @@ def load_tts_settings():
     else:
         tts_settings = {}
 
-
 def save_tts_settings():
     try:
         with open(TTS_SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(tts_settings, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"tts_settings 저장 실패: {e}", flush=True)
-
 
 def get_tts_settings(guild_id: int):
     key = str(guild_id)
@@ -3302,28 +1800,23 @@ def get_tts_settings(guild_id: int):
     settings.setdefault("between_delay", 0.15)
     return settings
 
-
 def normalize_rate(value: float) -> str:
     value = max(0.5, min(2.0, float(value)))
     percent = int(round((value - 1.0) * 100))
     return f"{percent:+d}%"
-
 
 def normalize_pitch(value: float) -> str:
     value = max(0.5, min(1.5, float(value)))
     hz = int(round((value - 1.0) * 50))
     return f"{hz:+d}Hz"
 
-
 def _rate_to_percent(rate_value: str) -> int:
     m = re.match(r'([+-]?\d+)%', str(rate_value or '+0%').strip())
     return int(m.group(1)) if m else 0
 
-
 def _pitch_to_hz(pitch_value: str) -> int:
     m = re.match(r'([+-]?\d+)Hz', str(pitch_value or '+0Hz').strip())
     return int(m.group(1)) if m else 0
-
 
 def get_dynamic_tts_profile(text_value: str, settings: dict) -> dict:
     base_rate = _rate_to_percent(settings.get('rate', '+0%'))
@@ -3363,7 +1856,6 @@ def get_dynamic_tts_profile(text_value: str, settings: dict) -> dict:
         'between_delay': round(delay + extra_pause, 3),
     }
 
-
 def compute_tts_priority(message: discord.Message, text_value: str, settings: dict) -> int:
     if not settings.get('priority_mode', True):
         return 5
@@ -3382,7 +1874,6 @@ def compute_tts_priority(message: discord.Message, text_value: str, settings: di
         return 7
     return 5
 
-
 def clean_tts_text(text: str) -> str:
     text = (text or "").strip()
     if not text:
@@ -3400,7 +1891,6 @@ def clean_tts_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-
 def should_read_user(settings: dict, user_id: int) -> bool:
     include_ids = set(settings.get("include_user_ids") or [])
     exclude_ids = set(settings.get("exclude_user_ids") or [])
@@ -3408,10 +1898,8 @@ def should_read_user(settings: dict, user_id: int) -> bool:
         return user_id in include_ids
     return user_id not in exclude_ids
 
-
 def build_voice_choices_text() -> str:
     return ", ".join(TTS_VOICE_CHOICES.keys())
-
 
 def build_target_summary(settings: dict, guild: discord.Guild) -> str:
     include_ids = settings.get("include_user_ids") or []
@@ -3430,7 +1918,6 @@ def build_target_summary(settings: dict, guild: discord.Guild) -> str:
         return "제외: " + ", ".join(names)
     return "전체"
 
-
 async def ensure_connected_to_saved_voice(guild: discord.Guild, settings: dict):
     if guild is None:
         raise RuntimeError("서버 안에서만 사용할 수 있어")
@@ -3443,12 +1930,6 @@ async def ensure_connected_to_saved_voice(guild: discord.Guild, settings: dict):
         channel = await bot.fetch_channel(voice_channel_id)
 
     voice_client = guild.voice_client
-    if isinstance(voice_client, wavelink.Player):
-        try:
-            await voice_client.disconnect()
-        except Exception:
-            pass
-        voice_client = None
 
     if voice_client is None:
         voice_client = await channel.connect(self_deaf=False, self_mute=False)
@@ -3456,7 +1937,6 @@ async def ensure_connected_to_saved_voice(guild: discord.Guild, settings: dict):
         await voice_client.move_to(channel)
 
     return voice_client
-
 
 async def synthesize_edge_tts(text_value: str, settings: dict, rate: str | None = None, pitch: str | None = None) -> str:
     temp_path = os.path.join(TTS_TEMP_DIR, f"tts_{uuid.uuid4().hex}.mp3")
@@ -3468,7 +1948,6 @@ async def synthesize_edge_tts(text_value: str, settings: dict, rate: str | None 
     )
     await communicate.save(temp_path)
     return temp_path
-
 
 async def play_tts_for_guild(guild: discord.Guild, text_value: str):
     text_value = clean_tts_text(text_value)
@@ -3497,9 +1976,7 @@ async def play_tts_for_guild(guild: discord.Guild, text_value: str):
     await finished.wait()
     await asyncio.sleep(max(0.0, float(profile.get("between_delay", settings.get("between_delay", 0.15)))))
 
-
 tts_queue_counters = {}
-
 
 async def enqueue_tts_message(guild: discord.Guild, text_value: str, priority: int = 5):
     queue = tts_queues.setdefault(guild.id, asyncio.PriorityQueue())
@@ -3510,7 +1987,6 @@ async def enqueue_tts_message(guild: discord.Guild, text_value: str, priority: i
     worker = tts_workers.get(guild.id)
     if worker is None or worker.done():
         tts_workers[guild.id] = bot.loop.create_task(tts_worker(guild))
-
 
 async def tts_worker(guild: discord.Guild):
     queue = tts_queues.setdefault(guild.id, asyncio.PriorityQueue())
@@ -3531,18 +2007,11 @@ async def tts_worker(guild: discord.Guild):
 
     tts_workers.pop(guild.id, None)
 
-
 async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_channel: discord.TextChannel):
     guild = ctx_like.guild
     if guild is None:
         raise RuntimeError("서버 안에서만 사용할 수 있어")
     voice_client = guild.voice_client
-    if isinstance(voice_client, wavelink.Player):
-        try:
-            await voice_client.disconnect()
-        except Exception:
-            pass
-        voice_client = None
 
     if voice_client is None:
         voice_client = await voice_channel.connect(self_deaf=False, self_mute=False)
@@ -3556,7 +2025,6 @@ async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_ch
     save_tts_settings()
     return settings
 
-
 async def disable_auto_tts(guild: discord.Guild):
     settings = get_tts_settings(guild.id)
     settings["enabled"] = False
@@ -3567,7 +2035,6 @@ async def disable_auto_tts(guild: discord.Guild):
             await vc.disconnect()
         except Exception:
             pass
-
 
 def build_auto_tts_status(settings: dict, guild: discord.Guild, channel: discord.TextChannel | None = None) -> str:
     read_nickname = "켜짐" if settings.get("read_nickname", True) else "꺼짐"
@@ -3588,17 +2055,10 @@ def build_auto_tts_status(settings: dict, guild: discord.Guild, channel: discord
         f"읽기 대상: {target_summary}"
     )
 
-
-for _name in ["입장", "퇴장", "재생", "일시정지", "다시재생", "스킵", "정지", "반복", "노래추가", "노래삭제", "가사", "도움말"]:
-    try:
-        bot.remove_command(_name)
-    except Exception:
-        pass
     try:
         bot.tree.remove_command(_name)
     except Exception:
         pass
-
 
 @bot.event
 async def on_ready():
@@ -3632,7 +2092,6 @@ async def on_ready():
     except Exception as e:
         print(f"초기화 오류: {e}", flush=True)
 
-
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -3664,7 +2123,6 @@ async def on_message(message: discord.Message):
     priority = compute_tts_priority(message, text_value, settings)
     await enqueue_tts_message(message.guild, text_value, priority)
 
-
 @bot.tree.command(name="입장", description="현재 음성 채널에 들어가고 이 채널의 채팅을 자동으로 읽습니다")
 async def slash_tts_join(interaction: discord.Interaction):
     try:
@@ -3679,7 +2137,6 @@ async def slash_tts_join(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ 입장 실패: {e}", ephemeral=True)
 
-
 @bot.tree.command(name="퇴장", description="음성 채널에서 나가고 자동 읽기를 끕니다")
 async def slash_tts_leave(interaction: discord.Interaction):
     try:
@@ -3687,7 +2144,6 @@ async def slash_tts_leave(interaction: discord.Interaction):
         await interaction.response.send_message("👋 음성 채널에서 나갔고 자동 읽기를 껐어", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"❌ 퇴장 실패: {e}", ephemeral=True)
-
 
 @bot.tree.command(name="닉네임읽기", description="자동 읽기에서 닉네임을 같이 읽을지 설정합니다")
 @app_commands.describe(mode="켜기 또는 끄기")
@@ -3704,7 +2160,6 @@ async def slash_nickname_tts(interaction: discord.Interaction, mode: app_command
         ephemeral=True,
     )
 
-
 @bot.tree.command(name="읽기채널", description="현재 채널을 자동 읽기 채널로 설정합니다")
 async def slash_reading_channel(interaction: discord.Interaction):
     settings = get_tts_settings(interaction.guild.id)
@@ -3715,11 +2170,9 @@ async def slash_reading_channel(interaction: discord.Interaction):
         ephemeral=True,
     )
 
-
 @bot.tree.command(name="tts도움말", description="TTS 자동 읽기 명령어 도움말을 보여줍니다")
 async def slash_tts_help(interaction: discord.Interaction):
     await interaction.response.send_message(build_tts_help_text(), ephemeral=True)
-
 
 @bot.tree.command(name="음성", description="자동 읽기 TTS 목소리를 바꿉니다")
 @app_commands.describe(종류="이름과 톤 설명을 보고 원하는 목소리를 선택")
@@ -3742,7 +2195,6 @@ async def slash_tts_voice(interaction: discord.Interaction, 종류: app_commands
         ephemeral=True,
     )
 
-
 @bot.tree.command(name="속도", description="자동 읽기 속도를 조절합니다")
 @app_commands.describe(배속="0.5 ~ 2.0 사이로 입력, 기본은 1.0")
 async def slash_tts_rate(interaction: discord.Interaction, 배속: float):
@@ -3753,7 +2205,6 @@ async def slash_tts_rate(interaction: discord.Interaction, 배속: float):
         f"✅ 읽기 속도를 {배속:.2f}배 느낌으로 바꿨어 ({settings['rate']})",
         ephemeral=True,
     )
-
 
 @bot.tree.command(name="톤", description="자동 읽기 톤을 조절합니다")
 @app_commands.describe(높이="0.5 ~ 1.5 사이로 입력, 기본은 1.0")
@@ -3766,7 +2217,6 @@ async def slash_tts_pitch(interaction: discord.Interaction, 높이: float):
         ephemeral=True,
     )
 
-
 @bot.tree.command(name="읽기최적화", description="메시지 길이에 따라 속도와 간격을 자동 보정할지 설정합니다")
 @app_commands.describe(mode="켜기 또는 끄기")
 @app_commands.choices(mode=[
@@ -3778,7 +2228,6 @@ async def slash_tts_auto_optimize(interaction: discord.Interaction, mode: app_co
     settings["auto_optimize"] = (mode.value == "켜기")
     save_tts_settings()
     await interaction.response.send_message(f"✅ 읽기 최적화: {'켜짐' if settings['auto_optimize'] else '꺼짐'}", ephemeral=True)
-
 
 @bot.tree.command(name="우선순위처리", description="중요/짧은 메시지를 먼저 읽을지 설정합니다")
 @app_commands.describe(mode="켜기 또는 끄기")
@@ -3796,7 +2245,6 @@ async def slash_tts_priority_mode(interaction: discord.Interaction, mode: app_co
         ephemeral=True,
     )
 
-
 @bot.tree.command(name="읽기제외추가", description="특정 유저를 자동 읽기에서 제외합니다")
 @app_commands.describe(유저="읽지 않을 유저")
 async def slash_tts_exclude_add(interaction: discord.Interaction, 유저: discord.Member):
@@ -3811,7 +2259,6 @@ async def slash_tts_exclude_add(interaction: discord.Interaction, 유저: discor
     save_tts_settings()
     await interaction.response.send_message(f"✅ {유저.display_name} 님을 읽기 제외에 추가했어", ephemeral=True)
 
-
 @bot.tree.command(name="읽기제외삭제", description="자동 읽기 제외 목록에서 유저를 제거합니다")
 @app_commands.describe(유저="다시 읽을 유저")
 async def slash_tts_exclude_remove(interaction: discord.Interaction, 유저: discord.Member):
@@ -3821,7 +2268,6 @@ async def slash_tts_exclude_remove(interaction: discord.Interaction, 유저: dis
     settings["exclude_user_ids"] = list(exclude_ids)
     save_tts_settings()
     await interaction.response.send_message(f"✅ {유저.display_name} 님을 제외 목록에서 뺐어", ephemeral=True)
-
 
 @bot.tree.command(name="읽기포함추가", description="특정 유저만 읽도록 포함 목록에 추가합니다")
 @app_commands.describe(유저="읽을 유저")
@@ -3840,7 +2286,6 @@ async def slash_tts_include_add(interaction: discord.Interaction, 유저: discor
         ephemeral=True,
     )
 
-
 @bot.tree.command(name="읽기포함삭제", description="포함 목록에서 유저를 제거합니다")
 @app_commands.describe(유저="제거할 유저")
 async def slash_tts_include_remove(interaction: discord.Interaction, 유저: discord.Member):
@@ -3851,7 +2296,6 @@ async def slash_tts_include_remove(interaction: discord.Interaction, 유저: dis
     save_tts_settings()
     await interaction.response.send_message(f"✅ {유저.display_name} 님을 포함 목록에서 뺐어", ephemeral=True)
 
-
 @bot.tree.command(name="읽기대상초기화", description="포함/제외 대상을 전부 초기화하고 다시 전체 읽기로 돌립니다")
 async def slash_tts_target_reset(interaction: discord.Interaction):
     settings = get_tts_settings(interaction.guild.id)
@@ -3859,7 +2303,6 @@ async def slash_tts_target_reset(interaction: discord.Interaction):
     settings["exclude_user_ids"] = []
     save_tts_settings()
     await interaction.response.send_message("✅ 읽기 대상 설정을 초기화했어. 이제 다시 전체를 읽어", ephemeral=True)
-
 
 @bot.tree.command(name="읽기상태", description="자동 읽기 상태와 목소리 설정을 보여줍니다")
 async def slash_tts_status(interaction: discord.Interaction):
@@ -3869,11 +2312,5 @@ async def slash_tts_status(interaction: discord.Interaction):
         "ℹ️ 현재 자동 읽기 상태\n" + build_auto_tts_status(settings, interaction.guild, channel),
         ephemeral=True,
     )
-
-
-@bot.event
-async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    return
-
 
 bot.run(TOKEN)
