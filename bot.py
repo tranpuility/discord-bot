@@ -2946,11 +2946,6 @@ async def list_schedule(ctx):
 # =========================
 # 실행
 # =========================
-async def restart_error(ctx, error):
-    if isinstance(error, commands.NotOwner):
-        await ctx.send("❌ 이 명령어는 봇 관리자만 사용할 수 있어.")
-
-
 # =========================
 # 슬래시 컨텍스트 / 슬래시 명령어
 # =========================
@@ -3537,7 +3532,7 @@ async def tts_worker(guild: discord.Guild):
     tts_workers.pop(guild.id, None)
 
 
-async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_channel: discord.abc.MessageableChannel):
+async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_channel: discord.TextChannel):
     guild = ctx_like.guild
     if guild is None:
         raise RuntimeError("서버 안에서만 사용할 수 있어")
