@@ -12,6 +12,7 @@ import uuid
 import tempfile
 import unicodedata
 import re
+import random
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont
@@ -47,6 +48,10 @@ if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
 RESTARTING = False
+
+WATCH_TOGETHER_APPLICATION_ID = 880218394199220334
+AUTO_VOICE_LEAVE_DELAY = 60
+auto_voice_leave_tasks = {}
 
 # =========================
 # 기본 설정
@@ -1744,6 +1749,7 @@ def build_tts_help_text() -> str:
 
 상태 확인
 /읽기상태 : 현재 자동 읽기 상태 확인
+/워치투게더 : 현재 음성 채널용 워치 투게더 초대 링크 생성
 /tts도움말 : 이 도움말 다시 보기
 
 목소리 선택 목록
@@ -2029,6 +2035,73 @@ async def tts_worker(guild: discord.Guild):
 
     tts_workers.pop(guild.id, None)
 
+def clear_tts_queue(guild_id: int):
+    queue = tts_queues.get(guild_id)
+    if queue is None:
+        return
+    try:
+        while True:
+            queue.get_nowait()
+            queue.task_done()
+    except asyncio.QueueEmpty:
+        pass
+
+def cancel_auto_voice_leave(guild_id: int):
+    task = auto_voice_leave_tasks.pop(guild_id, None)
+    if task and not task.done():
+        task.cancel()
+
+def voice_channel_has_human_members(channel: discord.VoiceChannel | discord.StageChannel | None) -> bool:
+    if channel is None:
+        return False
+    return any(not member.bot for member in channel.members)
+
+async def stop_voice_session(guild: discord.Guild, *, disable_tts: bool = True, clear_queue: bool = True):
+    cancel_auto_voice_leave(guild.id)
+    settings = get_tts_settings(guild.id)
+    settings["enabled"] = not disable_tts and settings.get("enabled", False)
+    if disable_tts:
+        settings["voice_channel_id"] = None
+    save_tts_settings()
+
+    if clear_queue:
+        clear_tts_queue(guild.id)
+
+    worker = tts_workers.get(guild.id)
+    if worker and not worker.done():
+        worker.cancel()
+
+    vc = guild.voice_client
+    if vc:
+        try:
+            if vc.is_playing() or vc.is_paused():
+                vc.stop()
+        except Exception:
+            pass
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+
+async def schedule_auto_voice_leave(guild: discord.Guild):
+    cancel_auto_voice_leave(guild.id)
+
+    async def _runner():
+        try:
+            await asyncio.sleep(AUTO_VOICE_LEAVE_DELAY)
+            vc = guild.voice_client
+            if vc is None or vc.channel is None:
+                return
+            if voice_channel_has_human_members(vc.channel):
+                return
+            await stop_voice_session(guild, disable_tts=True, clear_queue=True)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            auto_voice_leave_tasks.pop(guild.id, None)
+
+    auto_voice_leave_tasks[guild.id] = bot.loop.create_task(_runner())
+
 async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_channel: discord.TextChannel):
     guild = ctx_like.guild
     if guild is None:
@@ -2048,15 +2121,7 @@ async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_ch
     return settings
 
 async def disable_auto_tts(guild: discord.Guild):
-    settings = get_tts_settings(guild.id)
-    settings["enabled"] = False
-    save_tts_settings()
-    vc = guild.voice_client
-    if vc:
-        try:
-            await vc.disconnect()
-        except Exception:
-            pass
+    await stop_voice_session(guild, disable_tts=True, clear_queue=True)
 
 def build_auto_tts_status(settings: dict, guild: discord.Guild, channel: discord.TextChannel | None = None) -> str:
     read_nickname = "켜짐" if settings.get("read_nickname", True) else "꺼짐"
@@ -2115,6 +2180,24 @@ async def on_ready():
         print(f"초기화 오류: {e}", flush=True)
 
 @bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    guild = member.guild
+    vc = guild.voice_client
+    if vc is None or vc.channel is None:
+        cancel_auto_voice_leave(guild.id)
+        return
+
+    watched_channel = vc.channel
+    if before.channel != watched_channel and after.channel != watched_channel:
+        return
+
+    if voice_channel_has_human_members(watched_channel):
+        cancel_auto_voice_leave(guild.id)
+        return
+
+    await schedule_auto_voice_leave(guild)
+
+@bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
@@ -2145,6 +2228,40 @@ async def on_message(message: discord.Message):
     priority = compute_tts_priority(message, text_value, settings)
     await enqueue_tts_message(message.guild, text_value, priority)
 
+@bot.tree.command(name="워치투게더", description="현재 음성 채널용 워치 투게더 초대 링크를 만듭니다")
+async def slash_watch_together(interaction: discord.Interaction):
+    try:
+        if interaction.guild is None:
+            await interaction.response.send_message("❌ 서버 안에서만 사용할 수 있어", ephemeral=True)
+            return
+        if interaction.user.voice is None or interaction.user.voice.channel is None:
+            await interaction.response.send_message("❌ 먼저 음성 채널에 들어가 있어야 해", ephemeral=True)
+            return
+
+        voice_channel = interaction.user.voice.channel
+        invite_target = getattr(discord, "InviteTarget", None)
+        invite_kwargs = {
+            "max_age": 86400,
+            "max_uses": 0,
+            "temporary": False,
+            "unique": False,
+            "target_application_id": WATCH_TOGETHER_APPLICATION_ID,
+        }
+        if invite_target and hasattr(invite_target, "embedded_application"):
+            invite_kwargs["target_type"] = invite_target.embedded_application
+        else:
+            invite_kwargs["target_type"] = 2
+
+        invite = await voice_channel.create_invite(**invite_kwargs)
+        await interaction.response.send_message(
+            f"▶ 워치 투게더 링크를 만들었어\n{invite.url}\n음성 채널에서 링크를 눌러서 시작해줘",
+            ephemeral=True,
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ 초대 링크를 만들 권한이 없어. 봇에 초대 만들기 권한을 줘야 해", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ 워치 투게더 링크 생성 실패: {e}", ephemeral=True)
+
 @bot.tree.command(name="입장", description="현재 음성 채널에 들어가고 이 채널의 채팅을 자동으로 읽습니다")
 async def slash_tts_join(interaction: discord.Interaction):
     try:
@@ -2152,8 +2269,9 @@ async def slash_tts_join(interaction: discord.Interaction):
             await interaction.response.send_message("❌ 먼저 음성 채널에 들어가 있어야 해", ephemeral=True)
             return
         settings = await enable_auto_tts(InteractionCtx(interaction), interaction.user.voice.channel, interaction.channel)
+        cancel_auto_voice_leave(interaction.guild.id)
         await interaction.response.send_message(
-            "✅ 자동 읽기 TTS를 켰어\n" + build_auto_tts_status(settings, interaction.guild, interaction.channel),
+            "✅ 들어왔어. 자세한 상태는 /음성상태 로 확인해줘",
             ephemeral=True,
         )
     except Exception as e:
@@ -2332,6 +2450,16 @@ async def slash_tts_status(interaction: discord.Interaction):
     channel = interaction.guild.get_channel(settings.get("text_channel_id")) if settings.get("text_channel_id") else None
     await interaction.response.send_message(
         "ℹ️ 현재 자동 읽기 상태\n" + build_auto_tts_status(settings, interaction.guild, channel),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="음성상태", description="자동 읽기 상태와 목소리 설정을 보여줍니다")
+async def slash_voice_status(interaction: discord.Interaction):
+    settings = get_tts_settings(interaction.guild.id)
+    channel = interaction.guild.get_channel(settings.get("text_channel_id")) if settings.get("text_channel_id") else None
+    await interaction.response.send_message(
+        "ℹ️ 현재 음성 상태\n" + build_auto_tts_status(settings, interaction.guild, channel),
         ephemeral=True,
     )
 
