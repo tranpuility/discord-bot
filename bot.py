@@ -3175,10 +3175,11 @@ async def slash_delete_schedule(interaction: discord.Interaction, index: int):
 TTS_SETTINGS_FILE = os.path.join(DATA_DIR, "tts_settings.json")
 TTS_VOICE_CHOICES = {
     "선하": {"voice": "ko-KR-SunHiNeural", "tone": "밝고 부드러운 여성톤"},
-    "인준": {"voice": "ko-KR-InJoonNeural", "tone": "차분한 남성톤"},
     "지민": {"voice": "ko-KR-JiMinNeural", "tone": "부드럽고 자연스러운 여성톤"},
     "서현": {"voice": "ko-KR-SeoHyeonNeural", "tone": "맑고 안정적인 여성톤"},
-    "유진": {"voice": "ko-KR-YuJinNeural", "tone": "밝고 또렷한 여성톤"},
+    "인준": {"voice": "ko-KR-InJoonNeural", "tone": "차분한 남성톤"},
+    "봉진": {"voice": "ko-KR-BongJinNeural", "tone": "또렷하고 단정한 남성톤"},
+    "현수": {"voice": "ko-KR-HyunSuNeural", "tone": "부드럽고 젊은 남성톤"},
 }
 
 
@@ -3721,10 +3722,11 @@ async def slash_tts_help(interaction: discord.Interaction):
 @app_commands.describe(종류="이름과 톤 설명을 보고 원하는 목소리를 선택")
 @app_commands.choices(종류=[
     app_commands.Choice(name="선하 - 밝고 부드러운 여성톤", value="선하"),
-    app_commands.Choice(name="인준 - 차분한 남성톤", value="인준"),
     app_commands.Choice(name="지민 - 부드럽고 자연스러운 여성톤", value="지민"),
     app_commands.Choice(name="서현 - 맑고 안정적인 여성톤", value="서현"),
-    app_commands.Choice(name="유진 - 밝고 또렷한 여성톤", value="유진"),
+    app_commands.Choice(name="인준 - 차분한 남성톤", value="인준"),
+    app_commands.Choice(name="봉진 - 또렷하고 단정한 남성톤", value="봉진"),
+    app_commands.Choice(name="현수 - 부드럽고 젊은 남성톤", value="현수"),
 ])
 async def slash_tts_voice(interaction: discord.Interaction, 종류: app_commands.Choice[str]):
     settings = get_tts_settings(interaction.guild.id)
