@@ -3216,8 +3216,11 @@ def build_tts_help_text() -> str:
 /목소리 : 한국어 이름으로 TTS 목소리 선택
 /속도 : 읽는 속도 조절 (예: 0.8 ~ 1.2)
 /톤 : 목소리 높낮이 조절 (예: 0.8 ~ 1.2)
+<<<<<<< HEAD
 /읽기최적화 : 메시지 길이에 따라 속도와 간격을 자동 보정
 /우선순위처리 : 중요한 메시지를 먼저 읽기
+=======
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
 
 유저 필터
 /읽기제외추가, /읽기제외삭제 : 특정 유저 제외
@@ -3262,8 +3265,11 @@ TTS_DEFAULT_SETTINGS = {
     "include_user_ids": [],
     "exclude_user_ids": [],
     "between_delay": 0.15,
+<<<<<<< HEAD
     "auto_optimize": True,
     "priority_mode": True,
+=======
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
 }
 
 tts_settings = {}
@@ -3321,6 +3327,7 @@ def normalize_pitch(value: float) -> str:
     return f"{hz:+d}Hz"
 
 
+<<<<<<< HEAD
 def _rate_to_percent(rate_value: str) -> int:
     m = re.match(r'([+-]?\d+)%', str(rate_value or '+0%').strip())
     return int(m.group(1)) if m else 0
@@ -3389,6 +3396,8 @@ def compute_tts_priority(message: discord.Message, text_value: str, settings: di
     return 5
 
 
+=======
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
 def clean_tts_text(text: str) -> str:
     text = (text or "").strip()
     if not text:
@@ -3464,13 +3473,22 @@ async def ensure_connected_to_saved_voice(guild: discord.Guild, settings: dict):
     return voice_client
 
 
+<<<<<<< HEAD
 async def synthesize_edge_tts(text_value: str, settings: dict, rate: str | None = None, pitch: str | None = None) -> str:
+=======
+async def synthesize_edge_tts(text_value: str, settings: dict) -> str:
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
     temp_path = os.path.join(TTS_TEMP_DIR, f"tts_{uuid.uuid4().hex}.mp3")
     communicate = edge_tts.Communicate(
         text_value,
         voice=settings.get("voice", "ko-KR-SunHiNeural"),
+<<<<<<< HEAD
         rate=rate or settings.get("rate", "+0%"),
         pitch=pitch or settings.get("pitch", "+0Hz"),
+=======
+        rate=settings.get("rate", "+0%"),
+        pitch=settings.get("pitch", "+0Hz"),
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
     )
     await communicate.save(temp_path)
     return temp_path
@@ -3483,8 +3501,12 @@ async def play_tts_for_guild(guild: discord.Guild, text_value: str):
 
     settings = get_tts_settings(guild.id)
     voice_client = await ensure_connected_to_saved_voice(guild, settings)
+<<<<<<< HEAD
     profile = get_dynamic_tts_profile(text_value, settings)
     temp_path = await synthesize_edge_tts(text_value, settings, profile["rate"], profile["pitch"])
+=======
+    temp_path = await synthesize_edge_tts(text_value, settings)
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
 
     finished = asyncio.Event()
 
@@ -3501,6 +3523,7 @@ async def play_tts_for_guild(guild: discord.Guild, text_value: str):
     source = discord.FFmpegPCMAudio(temp_path)
     voice_client.play(source, after=after_play)
     await finished.wait()
+<<<<<<< HEAD
     await asyncio.sleep(max(0.0, float(profile.get("between_delay", settings.get("between_delay", 0.15)))))
 
 
@@ -3512,6 +3535,14 @@ async def enqueue_tts_message(guild: discord.Guild, text_value: str, priority: i
     counter = tts_queue_counters.get(guild.id, 0) + 1
     tts_queue_counters[guild.id] = counter
     await queue.put((priority, counter, text_value))
+=======
+    await asyncio.sleep(max(0.0, float(settings.get("between_delay", 0.15))))
+
+
+async def enqueue_tts_message(guild: discord.Guild, text_value: str):
+    queue = tts_queues.setdefault(guild.id, asyncio.Queue())
+    await queue.put(text_value)
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
 
     worker = tts_workers.get(guild.id)
     if worker is None or worker.done():
@@ -3519,12 +3550,20 @@ async def enqueue_tts_message(guild: discord.Guild, text_value: str, priority: i
 
 
 async def tts_worker(guild: discord.Guild):
+<<<<<<< HEAD
     queue = tts_queues.setdefault(guild.id, asyncio.PriorityQueue())
+=======
+    queue = tts_queues.setdefault(guild.id, asyncio.Queue())
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
     lock = tts_worker_locks.setdefault(guild.id, asyncio.Lock())
     async with lock:
         while True:
             try:
+<<<<<<< HEAD
                 _, _, text_value = await asyncio.wait_for(queue.get(), timeout=180)
+=======
+                text_value = await asyncio.wait_for(queue.get(), timeout=180)
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
             except asyncio.TimeoutError:
                 break
 
@@ -3667,8 +3706,12 @@ async def on_message(message: discord.Message):
     if settings.get("read_nickname", True):
         text_value = f"{message.author.display_name}님, {text_value}"
 
+<<<<<<< HEAD
     priority = compute_tts_priority(message, text_value, settings)
     await enqueue_tts_message(message.guild, text_value, priority)
+=======
+    await enqueue_tts_message(message.guild, text_value)
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
 
 
 @bot.tree.command(name="입장", description="현재 음성 채널에 들어가고 이 채널의 채팅을 자동으로 읽습니다")
@@ -3776,6 +3819,7 @@ async def slash_tts_pitch(interaction: discord.Interaction, 높이: float):
     )
 
 
+<<<<<<< HEAD
 @bot.tree.command(name="읽기최적화", description="메시지 길이에 따라 속도와 간격을 자동 보정할지 설정합니다")
 @app_commands.describe(mode="켜기 또는 끄기")
 @app_commands.choices(mode=[
@@ -3806,6 +3850,8 @@ async def slash_tts_priority_mode(interaction: discord.Interaction, mode: app_co
     )
 
 
+=======
+>>>>>>> 8e1d64cae9cf4628e0c055cc314f262592abda7e
 @bot.tree.command(name="읽기제외추가", description="특정 유저를 자동 읽기에서 제외합니다")
 @app_commands.describe(유저="읽지 않을 유저")
 async def slash_tts_exclude_add(interaction: discord.Interaction, 유저: discord.Member):
