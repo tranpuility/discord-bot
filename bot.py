@@ -72,6 +72,7 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN 환경변수가 비어 있습니다.")
 
+
 YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
 YTDLP_USE_COOKIES = os.getenv("YTDLP_USE_COOKIES", "false").lower() in ("1", "true", "yes", "on")
 YTDLP_FORCE_IPV4 = os.getenv("YTDLP_FORCE_IPV4", "true").lower() in ("1", "true", "yes", "on")
@@ -160,6 +161,8 @@ class SlashBot(commands.Bot):
             print(f"[setup_hook] 글로벌 슬래시 동기화 실패: {e}", flush=True)
 
 bot = SlashBot()
+
+
 
 
 def make_queue_item(channel_id: int | None, query: str):
@@ -3718,7 +3721,7 @@ async def slash_tts_help(interaction: discord.Interaction):
     await interaction.response.send_message(build_tts_help_text(), ephemeral=True)
 
 
-@bot.tree.command(name="목소리", description="자동 읽기 TTS 목소리를 바꿉니다")
+@bot.tree.command(name="음성", description="자동 읽기 TTS 목소리를 바꿉니다")
 @app_commands.describe(종류="이름과 톤 설명을 보고 원하는 목소리를 선택")
 @app_commands.choices(종류=[
     app_commands.Choice(name="선하 - 밝고 부드러운 여성톤", value="선하"),
