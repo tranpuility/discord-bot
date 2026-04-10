@@ -79,6 +79,7 @@ schedule = []
 user_colors = {}
 sent_alerts = set()
 schedule_task_started = False
+voice_monitor_task_started = False
 slash_sync_done = False
 
 # =========================
@@ -1431,7 +1432,7 @@ class CalendarView(discord.ui.View):
 # =========================
 @bot.event
 async def on_ready():
-    global schedule_task_started, slash_sync_done
+    global schedule_task_started, voice_monitor_task_started, slash_sync_done
     print(f"로그인 완료: {bot.user}", flush=True)
 
     if not slash_sync_done:
@@ -1456,6 +1457,10 @@ async def on_ready():
         if not schedule_task_started:
             bot.loop.create_task(check_schedule())
             schedule_task_started = True
+
+        if not voice_monitor_task_started:
+            bot.loop.create_task(voice_idle_watchdog())
+            voice_monitor_task_started = True
 
     except Exception as e:
         print(f"초기화 오류: {e}", flush=True)
@@ -2102,6 +2107,25 @@ async def schedule_auto_voice_leave(guild: discord.Guild):
 
     auto_voice_leave_tasks[guild.id] = bot.loop.create_task(_runner())
 
+async def voice_idle_watchdog():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            for guild in bot.guilds:
+                vc = guild.voice_client
+                if vc is None or vc.channel is None:
+                    cancel_auto_voice_leave(guild.id)
+                    continue
+                if voice_channel_has_human_members(vc.channel):
+                    cancel_auto_voice_leave(guild.id)
+                    continue
+                task = auto_voice_leave_tasks.get(guild.id)
+                if task is None or task.done():
+                    await schedule_auto_voice_leave(guild)
+        except Exception as e:
+            print(f"voice idle watchdog 오류: {e}", flush=True)
+        await asyncio.sleep(15)
+
 async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_channel: discord.TextChannel):
     guild = ctx_like.guild
     if guild is None:
@@ -2453,6 +2477,47 @@ async def slash_tts_status(interaction: discord.Interaction):
         ephemeral=True,
     )
 
+
+@bot.tree.command(name="주사위", description="주사위를 굴립니다")
+@app_commands.describe(면수="주사위 면수", 개수="굴릴 개수")
+async def slash_dice(interaction: discord.Interaction, 면수: app_commands.Range[int, 2, 1000] = 6, 개수: app_commands.Range[int, 1, 20] = 1):
+    results = [random.randint(1, 면수) for _ in range(개수)]
+    total = sum(results)
+    await interaction.response.send_message(
+        f"🎲 주사위 결과 ({개수}개 d{면수})\n결과: {', '.join(map(str, results))}\n합계: {total}",
+        ephemeral=True,
+    )
+
+@bot.tree.command(name="랜덤", description="입력한 항목 중 하나를 랜덤으로 골라줍니다")
+@app_commands.describe(항목들="쉼표(,)로 구분해서 입력해줘. 예: 치킨, 피자, 햄버거")
+async def slash_random_pick(interaction: discord.Interaction, 항목들: str):
+    items = [item.strip() for item in re.split(r'[,/\n]', 항목들) if item.strip()]
+    if len(items) < 2:
+        await interaction.response.send_message("❌ 항목을 2개 이상 입력해줘. 예: 치킨, 피자, 햄버거", ephemeral=True)
+        return
+    picked = random.choice(items)
+    await interaction.response.send_message(
+        f"🎯 랜덤 선택 결과\n후보: {', '.join(items)}\n선택: **{picked}**",
+        ephemeral=True,
+    )
+
+@bot.tree.command(name="투표", description="간단한 투표를 만들고 반응 이모지를 붙입니다")
+@app_commands.describe(제목="투표 제목", 항목들="쉼표(,)로 구분해서 입력해줘. 최대 9개")
+async def slash_poll(interaction: discord.Interaction, 제목: str, 항목들: str):
+    items = [item.strip() for item in re.split(r'[,/\n]', 항목들) if item.strip()]
+    if len(items) < 2:
+        await interaction.response.send_message("❌ 투표 항목을 2개 이상 입력해줘.", ephemeral=True)
+        return
+    if len(items) > 9:
+        await interaction.response.send_message("❌ 투표 항목은 최대 9개까지 가능해.", ephemeral=True)
+        return
+
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+    description = "\n".join(f"{number_emojis[i]} {item}" for i, item in enumerate(items))
+    await interaction.response.send_message(f"📊 **{제목}**\n\n{description}")
+    message = await interaction.original_response()
+    for i in range(len(items)):
+        await message.add_reaction(number_emojis[i])
 
 @bot.tree.command(name="음성상태", description="자동 읽기 상태와 목소리 설정을 보여줍니다")
 async def slash_voice_status(interaction: discord.Interaction):
