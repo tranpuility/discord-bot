@@ -2946,7 +2946,6 @@ async def list_schedule(ctx):
 # =========================
 # 실행
 # =========================
-@restart.error
 async def restart_error(ctx, error):
     if isinstance(error, commands.NotOwner):
         await ctx.send("❌ 이 명령어는 봇 관리자만 사용할 수 있어.")
