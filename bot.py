@@ -3874,4 +3874,43 @@ async def slash_tts_status(interaction: discord.Interaction):
     )
 
 
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    guild = member.guild
+    if guild is None:
+        return
+
+    settings = get_tts_settings(guild.id)
+    if not settings.get("enabled"):
+        return
+
+    vc = guild.voice_client
+    if vc is None or getattr(vc, "channel", None) is None:
+        return
+
+    watched_channel_id = settings.get("voice_channel_id")
+    if watched_channel_id and vc.channel.id != watched_channel_id:
+        return
+
+    changed_channel_ids = {
+        getattr(getattr(before, "channel", None), "id", None),
+        getattr(getattr(after, "channel", None), "id", None),
+    }
+    if vc.channel.id not in changed_channel_ids:
+        return
+
+    human_members = [m for m in vc.channel.members if not m.bot]
+    if human_members:
+        return
+
+    text_channel = guild.get_channel(settings.get("text_channel_id")) if settings.get("text_channel_id") else None
+    await disable_auto_tts(guild)
+
+    if text_channel is not None:
+        try:
+            await text_channel.send("👋 사람이 다 나가서 자동으로 음성 채널에서 나갔고 자동 읽기도 껐어")
+        except Exception:
+            pass
+
+
 bot.run(TOKEN)
