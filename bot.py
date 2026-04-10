@@ -50,8 +50,11 @@ if not TOKEN:
 RESTARTING = False
 
 WATCH_TOGETHER_APPLICATION_ID = 880218394199220334
-AUTO_VOICE_LEAVE_DELAY = 60
+AUTO_VOICE_LEAVE_DELAY = 180
 auto_voice_leave_tasks = {}
+last_tts_speaker = {}
+last_tts_speaker_at = {}
+TTS_NICKNAME_SKIP_WINDOW = 90
 
 # =========================
 # 기본 설정
@@ -846,10 +849,9 @@ class HelpView(discord.ui.View):
             "/일정추가 날짜 시간 내용\n"
             "/일정삭제 번호\n"
             "/일정목록\n"
-            "/일정검색\n"
             "/일정수정\n\n"
             "일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n"
-            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n"
+            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n\n"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -858,25 +860,23 @@ class HelpView(discord.ui.View):
         text = build_tts_help_text()
         await interaction.response.send_message(text, ephemeral=True)
 
-    @discord.ui.button(label="🎮 기타", style=discord.ButtonStyle.secondary)
-    async def misc_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-        text = (
-            "🎮 기타 도움말\n\n"
-            "/주사위 : 주사위를 굴려\n"
-            "/랜덤 : 입력한 후보 중 하나를 골라\n"
-            "/투표 : 반응 이모지 투표를 만들어\n"
-            "/워치투게더 : 현재 음성 채널용 워치 투게더 링크를 만들어\n"
-            "/음성테스트 : 현재 내 음성 설정이 실제로 되는지 테스트해\n"
-            "/음성상태 : 현재 읽기 상태와 적용된 음성을 확인해\n"
-        )
-        await interaction.response.send_message(text, ephemeral=True)
-
 class HelpButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="📖 도움말", style=discord.ButtonStyle.primary, row=0)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message("보고 싶은 도움말을 골라줘", view=HelpView(), ephemeral=True)
+        text = (
+            "📅 일정 도움말\n\n"
+            "/캘린더\n"
+            "/캘린더 2026 03\n"
+            "/일정추가 날짜 시간 내용\n"
+            "/일정삭제 번호\n"
+            "/일정목록\n"
+            "/일정수정\n\n"
+            "일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n"
+            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n\n"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
 
 class ScheduleHelpButton(discord.ui.Button):
     def __init__(self):
@@ -2151,13 +2151,18 @@ def cancel_auto_voice_leave(guild_id: int):
     if task and not task.done():
         task.cancel()
 
-def voice_channel_has_human_members(channel: discord.VoiceChannel | discord.StageChannel | None) -> bool:
+def count_human_members(channel: discord.VoiceChannel | discord.StageChannel | None) -> int:
     if channel is None:
-        return False
-    return any(not member.bot for member in channel.members)
+        return 0
+    return sum(1 for member in channel.members if not member.bot)
+
+def voice_channel_has_human_members(channel: discord.VoiceChannel | discord.StageChannel | None) -> bool:
+    return count_human_members(channel) > 0
 
 async def stop_voice_session(guild: discord.Guild, *, disable_tts: bool = True, clear_queue: bool = True):
     cancel_auto_voice_leave(guild.id)
+    last_tts_speaker.pop(guild.id, None)
+    last_tts_speaker_at.pop(guild.id, None)
     settings = get_tts_settings(guild.id)
     settings["enabled"] = not disable_tts and settings.get("enabled", False)
     if disable_tts:
@@ -2188,12 +2193,31 @@ async def schedule_auto_voice_leave(guild: discord.Guild):
 
     async def _runner():
         try:
+            initial_vc = guild.voice_client
+            if initial_vc is None or initial_vc.channel is None:
+                return
+            watched_channel = initial_vc.channel
+            watched_channel_id = watched_channel.id
+            if count_human_members(watched_channel) > 0:
+                return
+
             await asyncio.sleep(AUTO_VOICE_LEAVE_DELAY)
+
             vc = guild.voice_client
             if vc is None or vc.channel is None:
                 return
-            if voice_channel_has_human_members(vc.channel):
+            if vc.channel.id != watched_channel_id:
                 return
+            if count_human_members(vc.channel) > 0:
+                return
+            if vc.is_playing() or vc.is_paused():
+                return
+
+            settings = get_tts_settings(guild.id)
+            saved_voice_channel_id = settings.get("voice_channel_id")
+            if saved_voice_channel_id and vc.channel.id != saved_voice_channel_id:
+                return
+
             await stop_voice_session(guild, disable_tts=True, clear_queue=True)
         except asyncio.CancelledError:
             pass
@@ -2211,15 +2235,17 @@ async def voice_idle_watchdog():
                 if vc is None or vc.channel is None:
                     cancel_auto_voice_leave(guild.id)
                     continue
-                if voice_channel_has_human_members(vc.channel):
+                if count_human_members(vc.channel) > 0:
                     cancel_auto_voice_leave(guild.id)
+                    continue
+                if vc.is_playing() or vc.is_paused():
                     continue
                 task = auto_voice_leave_tasks.get(guild.id)
                 if task is None or task.done():
                     await schedule_auto_voice_leave(guild)
         except Exception as e:
             print(f"voice idle watchdog 오류: {e}", flush=True)
-        await asyncio.sleep(15)
+        await asyncio.sleep(20)
 
 async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_channel: discord.TextChannel):
     guild = ctx_like.guild
@@ -2313,7 +2339,11 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     if before.channel != watched_channel and after.channel != watched_channel:
         return
 
-    if voice_channel_has_human_members(watched_channel):
+    if count_human_members(watched_channel) > 0:
+        cancel_auto_voice_leave(guild.id)
+        return
+
+    if vc.is_playing() or vc.is_paused():
         cancel_auto_voice_leave(guild.id)
         return
 
@@ -2344,12 +2374,22 @@ async def on_message(message: discord.Message):
     if not text_value:
         return
 
-    if settings.get("read_nickname", True):
+    now_ts = asyncio.get_running_loop().time()
+    prev_author_id = last_tts_speaker.get(message.guild.id)
+    prev_author_at = last_tts_speaker_at.get(message.guild.id, 0.0)
+    same_author_streak = (
+        prev_author_id == message.author.id
+        and (now_ts - prev_author_at) <= TTS_NICKNAME_SKIP_WINDOW
+    )
+
+    if settings.get("read_nickname", True) and not same_author_streak:
         text_value = f"{message.author.display_name} {text_value}"
 
     effective_settings = build_effective_tts_settings(settings, message.author.id)
     priority = compute_tts_priority(message, text_value, effective_settings)
     await enqueue_tts_message(message.guild, text_value, priority, effective_settings)
+    last_tts_speaker[message.guild.id] = message.author.id
+    last_tts_speaker_at[message.guild.id] = now_ts
 
 @bot.tree.command(name="워치투게더", description="현재 음성 채널용 워치 투게더 초대 링크를 만듭니다")
 async def slash_watch_together(interaction: discord.Interaction):
