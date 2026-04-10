@@ -1,9 +1,6 @@
 discord.py[voice]
 PyNaCl
-davey>=0.1.5
 python-dotenv
 Pillow
-yt-dlp
-wavelink
-aiohttp
 korean-lunar-calendar
+edge-tts
