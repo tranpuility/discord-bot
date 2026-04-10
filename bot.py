@@ -48,6 +48,28 @@ if not TOKEN:
 
 RESTARTING = False
 
+# =========================
+# 기본 설정
+# =========================
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
+intents.members = True
+
+class SlashBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
+
+    async def setup_hook(self):
+        try:
+            synced_global = await self.tree.sync()
+            print(f"[setup_hook] 글로벌 슬래시 동기화 완료: {len(synced_global)}개", flush=True)
+        except Exception as e:
+            print(f"[setup_hook] 글로벌 슬래시 동기화 실패: {e}", flush=True)
+
+bot = SlashBot()
+
+
 schedule = []
 user_colors = {}
 sent_alerts = set()
