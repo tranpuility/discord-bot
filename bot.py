@@ -3659,7 +3659,7 @@ async def on_message(message: discord.Message):
         return
 
     if settings.get("read_nickname", True):
-        text_value = f"{message.author.display_name}님, {text_value}"
+        text_value = f"{message.author.display_name} {text_value}"
 
     priority = compute_tts_priority(message, text_value, settings)
     await enqueue_tts_message(message.guild, text_value, priority)
