@@ -7,35 +7,10 @@ import os
 import sys
 import asyncio
 import aiohttp
-try:
-    import yt_dlp
-except Exception:
-    yt_dlp = None
-try:
-    import wavelink
-except Exception:
-    class _DummyPlayer: pass
-    class _DummyPool:
-        nodes = []
-        @staticmethod
-        async def connect(*args, **kwargs):
-            return None
-    class _DummyNode:
-        def __init__(self, *args, **kwargs):
-            pass
-    class _DummyPlayable:
-        @staticmethod
-        async def search(*args, **kwargs):
-            return []
-    class _DummyWavelink:
-        Player = _DummyPlayer
-        Pool = _DummyPool
-        Node = _DummyNode
-        Playable = _DummyPlayable
-    wavelink = _DummyWavelink()
+import yt_dlp
+import wavelink
 import calendar
 import uuid
-import tempfile
 import unicodedata
 import re
 from datetime import datetime, timedelta
@@ -52,7 +27,6 @@ from urllib.parse import quote_plus
 import xml.etree.ElementTree as ET
 
 from dotenv import load_dotenv
-import edge_tts
 
 # =========================
 # 경로 / 환경변수
@@ -2005,24 +1979,31 @@ class HelpView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
 
+    @discord.ui.button(label="🎵 노래", style=discord.ButtonStyle.primary)
+    async def music_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        text = (
+            "🎵 노래 명령어\n\n"
+            "/입장\n"
+            "/퇴장\n"
+            "/재생 노래이름\n/재생 유튜브플레이리스트URL\n"
+            "/정지\n"
+            "/일시정지\n"
+            "/다시재생\n"
+            "/가사 가수 - 제목\n"
+            "/노래리스트"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
+
     @discord.ui.button(label="📅 일정", style=discord.ButtonStyle.success)
     async def schedule_help(self, interaction: discord.Interaction, button: discord.ui.Button):
         text = (
-            "📅 일정 도움말\n\n"
+            "📅 일정 명령어\n\n"
             "/캘린더\n"
             "/캘린더 2026 03\n"
             "/일정추가 날짜 시간 내용\n"
             "/일정삭제 번호\n"
-            "/일정목록\n"
-            "/일정수정\n\n"
-            "일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n"
-            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n\n"
+            "/일정목록\n\n일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말"
         )
-        await interaction.response.send_message(text, ephemeral=True)
-
-    @discord.ui.button(label="🔊 TTS", style=discord.ButtonStyle.primary)
-    async def tts_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-        text = build_tts_help_text()
         await interaction.response.send_message(text, ephemeral=True)
 
 
@@ -2032,15 +2013,14 @@ class HelpButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         text = (
-            "📅 일정 도움말\n\n"
+            "📅 일정 명령어\n\n"
             "/캘린더\n"
             "/캘린더 2026 03\n"
             "/일정추가 날짜 시간 내용\n"
             "/일정삭제 번호\n"
-            "/일정목록\n"
-            "/일정수정\n\n"
+            "/일정목록\n\n"
             "일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n"
-            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n\n"
+            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -2051,15 +2031,12 @@ class ScheduleHelpButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         text = (
-            "📅 일정 도움말\n\n"
+            "📅 일정 명령어\n\n"
             "/캘린더\n"
             "/캘린더 2026 03\n"
             "/일정추가 날짜 시간 내용\n"
             "/일정삭제 번호\n"
-            "/일정목록\n"
-            "/일정수정\n\n"
-            "일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n"
-            "반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말\n\n"
+            "/일정목록\n\n일정 종류: 개인 / 생일 / 이벤트 / 업데이트 / 임시공휴일\n반복 설정: 없음 / 매일 / 매월 / 매년 / 요일반복(월,화,수,목,금,토,일 선택) / 평일 / 주말"
         )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -2890,7 +2867,30 @@ async def on_ready():
     try:
         load_schedule()
         load_colors()
+        load_music_data()
 
+        cookie_file = resolve_cookie_file()
+        if cookie_file:
+            print(f"yt-dlp cookies 적용됨: {cookie_file}")
+        else:
+            print("yt-dlp cookies 미적용: 쿠키 없이 우회 모드로 시도할게", flush=True)
+        print(f"yt-dlp IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}", flush=True)
+        print(f"yt-dlp web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}", flush=True)
+
+        if MUSIC_BACKEND == "lavalink":
+            try:
+                await ensure_lavalink_ready()
+                set_active_music_backend("lavalink", "on_ready 연결 성공")
+            except Exception as e:
+                if MUSIC_AUTO_FALLBACK:
+                    set_active_music_backend("direct", f"on_ready lavalink 실패: {e}")
+                    print(f"[music-backend] on_ready lavalink 실패 → direct 사용: {e}", flush=True)
+                else:
+                    print(f"[music-backend] on_ready lavalink 실패: {e}", flush=True)
+        else:
+            set_active_music_backend("direct", "기본 direct 모드",)
+
+        # 예전에 남아 있던 길드 전용 슬래시 명령어 제거
         cleared = 0
         for guild in bot.guilds:
             try:
@@ -2901,6 +2901,75 @@ async def on_ready():
                 print(f"[slash-cleanup] {guild.name} 길드 명령어 정리 실패: {e}", flush=True)
         if cleared:
             print(f"기존 길드 슬래시 명령어 정리 완료: {cleared}개 길드", flush=True)
+
+        if os.path.exists(RESTART_FILE):
+            try:
+                os.replace(RESTART_FILE, RESTART_PROCESSING_FILE)
+
+                with open(RESTART_PROCESSING_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                channel_id = data.get("channel_id")
+                message_id = data.get("message_id")
+                guild_id = data.get("guild_id")
+                voice_channel_id = data.get("voice_channel_id")
+                last_query = data.get("last_query")
+                queue_data = data.get("queue", [])
+                repeat_state = data.get("repeat", False)
+
+                if channel_id and message_id:
+                    channel = bot.get_channel(channel_id)
+                    if channel:
+                        try:
+                            msg = await channel.fetch_message(message_id)
+                            await msg.edit(content="✅ 재시동 완료!")
+                        except Exception:
+                            await channel.send("✅ 재시동 완료!")
+
+                if guild_id:
+                    guild = bot.get_guild(guild_id)
+                    if guild:
+                        state = get_music_state(guild_id)
+                        if last_query:
+                            state["last_query"] = last_query
+                        state["repeat"] = repeat_state
+                        state["restored_queue"] = [q for q in queue_data if isinstance(q, str)]
+
+                        if voice_channel_id:
+                            voice_channel = bot.get_channel(voice_channel_id)
+                            if voice_channel and getattr(voice_channel, "connect", None):
+                                try:
+                                    if use_lavalink_backend():
+                                        if guild.voice_client is None:
+                                            await voice_channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+                                        else:
+                                            player = guild.voice_client
+                                            if isinstance(player, wavelink.Player):
+                                                await player.move_to(voice_channel)
+                                            else:
+                                                await guild.voice_client.disconnect()
+                                                await voice_channel.connect(cls=wavelink.Player, self_deaf=False, self_mute=False)
+                                    else:
+                                        if guild.voice_client is None:
+                                            await voice_channel.connect(self_deaf=False, self_mute=False)
+                                        else:
+                                            if isinstance(guild.voice_client, wavelink.Player):
+                                                await guild.voice_client.disconnect()
+                                                await voice_channel.connect(self_deaf=False, self_mute=False)
+                                            else:
+                                                await guild.voice_client.move_to(voice_channel)
+                                    state["last_voice_channel_id"] = voice_channel_id
+                                except Exception as e:
+                                    print(f"자동 재입장 실패: {e}", flush=True)
+
+                if os.path.exists(RESTART_PROCESSING_FILE):
+                    os.remove(RESTART_PROCESSING_FILE)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                print(f"재시동 완료 처리 실패: {e}", flush=True)
+                if os.path.exists(RESTART_PROCESSING_FILE):
+                    os.remove(RESTART_PROCESSING_FILE)
 
         if not schedule_task_started:
             bot.loop.create_task(check_schedule())
@@ -2917,13 +2986,428 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
-# =========================
-# TTS 명령어
-# =========================
+@bot.event
+async def on_wavelink_track_end(payload):
+    player = getattr(payload, "player", None)
+    if not player or not getattr(player, "guild", None):
+        return
+
+    guild_id = player.guild.id
+    state = get_music_state(guild_id)
+
+    current = state.get("current")
+    if current:
+        if state.get("repeat"):
+            queue = get_guild_queue(guild_id)
+            queue.insert(0, make_queue_item(state.get("last_text_channel_id"), current["query"]))
+        else:
+            state["history"].append(current["query"])
+
+    state["current"] = None
+    save_music_data()
+    await play_next(guild_id)
 
 
-TTS_TEMP_DIR = os.path.join(DATA_DIR, "tts_cache")
-os.makedirs(TTS_TEMP_DIR, exist_ok=True)
+@bot.event
+async def on_wavelink_track_exception(payload):
+    player = getattr(payload, "player", None)
+    if not player or not getattr(player, "guild", None):
+        return
+    guild_id = player.guild.id
+    await send_music_message(guild_id, "⚠️ 재생 중 오류가 발생해서 다음 곡으로 넘어갈게")
+    await play_next(guild_id)
+
+
+# =========================
+# 음악 명령어
+# =========================
+@bot.command(name="재시동")
+@commands.is_owner()
+async def restart(ctx):
+    global RESTARTING
+
+    if RESTARTING:
+        return
+
+    RESTARTING = True
+    restart_msg = await ctx.send("🔄 봇 재시작 중...")
+
+    guild_id = ctx.guild.id if ctx.guild else None
+    voice_channel_id = None
+    last_query = None
+    queue_data = []
+    repeat_state = False
+
+    if guild_id:
+        state = get_music_state(guild_id)
+        repeat_state = state.get("repeat", False)
+        last_query = state.get("last_query")
+
+        current = state.get("current")
+        if current and not last_query:
+            last_query = current.get("query")
+
+        queue = get_guild_queue(guild_id)
+        queue_data = [query for _, query in (unpack_queue_item(item) for item in queue) if isinstance(query, str)]
+
+        if ctx.voice_client and ctx.voice_client.channel:
+            voice_channel_id = ctx.voice_client.channel.id
+        elif state.get("last_voice_channel_id"):
+            voice_channel_id = state.get("last_voice_channel_id")
+
+    try:
+        with open(RESTART_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "channel_id": ctx.channel.id,
+                "message_id": restart_msg.id,
+                "guild_id": guild_id,
+                "voice_channel_id": voice_channel_id,
+                "last_query": last_query,
+                "queue": queue_data,
+                "repeat": repeat_state
+            }, f)
+    except Exception as e:
+        print(f"재시작 채널 저장 실패: {e}")
+
+    save_music_data()
+
+    try:
+        if ctx.voice_client:
+            player = resolve_voice_client(ctx) or ctx.voice_client
+            await player.disconnect()
+    except Exception:
+        pass
+
+    await bot.close()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+@bot.command(name="입장")
+async def join(ctx):
+    if ctx.author.voice is None:
+        await ctx.send("먼저 음성 채널에 들어가 있어야 해.")
+        return
+
+    channel = ctx.author.voice.channel
+    state = get_music_state(ctx.guild.id)
+    state["last_voice_channel_id"] = channel.id
+    state["last_text_channel_id"] = ctx.channel.id
+    save_music_data()
+
+    existing_vc = ctx.guild.voice_client
+    if existing_vc is not None and getattr(existing_vc, "channel", None) == channel:
+        backend_name = "Lavalink" if isinstance(existing_vc, wavelink.Player) else "Direct"
+        await ctx.send(f"✅ 이미 {channel.name}에 연결되어 있어 ({backend_name})")
+        return
+
+    try:
+        player = await get_or_connect_player(ctx)
+        backend_name = "Lavalink" if isinstance(player, wavelink.Player) else "Direct"
+        await ctx.send(f"✅ {channel.name} 입장 완료 ({backend_name})")
+    except asyncio.TimeoutError:
+        await ctx.send("❌ 음성 채널 연결이 너무 오래 걸려서 실패했어. 봇을 채널에서 완전히 내보낸 뒤 다시 시도해줘.")
+    except Exception as e:
+        await ctx.send(f"❌ 입장 실패: {e}")
+
+
+@bot.command(name="퇴장")
+async def leave(ctx):
+    if ctx.voice_client:
+        guild_id = ctx.guild.id
+        music_queues[guild_id] = []
+
+        state = get_music_state(guild_id)
+        if state.get("current") and state["current"].get("query"):
+            state["last_query"] = state["current"]["query"]
+        state["current"] = None
+        state["history"] = []
+        state["repeat"] = False
+        state["restored_queue"] = []
+        save_music_data()
+
+        player = resolve_voice_client(ctx) or ctx.voice_client
+        await player.disconnect()
+        await ctx.send("👋 퇴장 완료")
+    else:
+        await ctx.send("음성 채널에 없음")
+
+
+@bot.command(name="재생")
+async def play(ctx, *, query: str = None):
+    guild_id = ctx.guild.id
+    state = get_music_state(guild_id)
+
+    if query is None:
+        if state.get("current") and state["current"].get("query"):
+            query = state["current"]["query"]
+        elif state.get("last_query"):
+            query = state["last_query"]
+        else:
+            await ctx.send("재생할 노래를 먼저 입력해줘")
+            return
+
+    try:
+        player = await get_or_connect_player(ctx)
+    except asyncio.TimeoutError:
+        await ctx.send("❌ 음성 채널 연결이 너무 오래 걸려서 실패했어. 봇을 채널에서 완전히 내보낸 뒤 다시 시도해줘.")
+        return
+    except Exception as e:
+        await ctx.send(f"❌ 재생 준비 실패: {e}")
+        return
+
+    queue = get_guild_queue(guild_id)
+    state["last_text_channel_id"] = ctx.channel.id
+
+    restored_queue = state.get("restored_queue", [])
+    if restored_queue:
+        for restored_query in restored_queue:
+            queue.append(make_queue_item(ctx.channel.id, restored_query))
+        state["restored_queue"] = []
+
+    if is_youtube_playlist_url(query):
+        try:
+            playlist_entries = await extract_playlist_entries(query)
+        except Exception as e:
+            await ctx.send(f"❌ 플레이리스트를 불러오지 못했어: {sanitize_music_error(e)}")
+            return
+
+        if not playlist_entries:
+            await ctx.send("플레이리스트 안에서 재생할 곡을 찾지 못했어")
+            return
+
+        added_queries = []
+        for _, entry_url in playlist_entries:
+            queue.append(make_queue_item(ctx.channel.id, entry_url))
+            added_queries.append(entry_url)
+
+        state["last_query"] = query
+        save_music_data()
+
+        await ctx.send(f"📃 플레이리스트 추가 완료: {len(added_queries)}곡", view=MusicView(guild_id))
+
+        if not player_is_playing(player) and not player_is_paused(player):
+            await play_next(guild_id)
+        return
+
+    queue.append(make_queue_item(ctx.channel.id, query))
+    state["last_query"] = query
+    save_music_data()
+
+    if player_is_playing(player) or player_is_paused(player):
+        await ctx.send(f"🎶 대기열 추가됨: {query}", view=MusicView(guild_id))
+    else:
+        await play_next(guild_id)
+
+
+@bot.command(name="정지")
+async def stop(ctx):
+    guild_id = ctx.guild.id
+    music_queues[guild_id] = []
+
+    state = get_music_state(guild_id)
+    if state.get("current") and state["current"].get("query"):
+        state["last_query"] = state["current"]["query"]
+    state["current"] = None
+    state["restored_queue"] = []
+    state["last_text_channel_id"] = ctx.channel.id
+    save_music_data()
+
+    player = resolve_voice_client(ctx) or ctx.voice_client
+    if player:
+        try:
+            if isinstance(player, wavelink.Player):
+                await player.stop()
+            else:
+                player.stop()
+            await ctx.send("⏹️ 정지 완료")
+        except Exception as e:
+            await ctx.send(f"❌ 정지 실패: {e}")
+    else:
+        await ctx.send("음성 채널에 없음")
+
+
+@bot.command(name="일시정지")
+async def pause(ctx):
+    player = resolve_voice_client(ctx) or ctx.voice_client
+    if player and player_is_playing(player):
+        if isinstance(player, wavelink.Player):
+            await player.pause(True)
+        else:
+            player.pause()
+        await ctx.send("⏸️ 일시정지")
+    else:
+        await ctx.send("현재 재생 중인 노래가 없어")
+
+
+@bot.command(name="다시재생")
+async def resume(ctx):
+    player = resolve_voice_client(ctx) or ctx.voice_client
+    if player and player_is_paused(player):
+        if isinstance(player, wavelink.Player):
+            await player.pause(False)
+        else:
+            player.resume()
+        await ctx.send("▶️ 다시 재생")
+    else:
+        await ctx.send("일시정지된 노래가 없어")
+
+
+@bot.command(name="노래리스트")
+async def queue_list(ctx):
+    guild_id = ctx.guild.id
+    await send_queue_list(ctx, guild_id)
+
+
+# =========================
+# 플레이리스트 기능
+# =========================
+@bot.command(name="플레이리스트정보")
+async def playlist_info(ctx, *, query: str):
+    if not is_youtube_playlist_url(query):
+        await ctx.send("유튜브 플레이리스트 URL을 넣어줘")
+        return
+
+    try:
+        playlist_entries = await extract_playlist_entries(query)
+    except Exception as e:
+        await ctx.send(f"❌ 플레이리스트 정보를 불러오지 못했어: {sanitize_music_error(e)}")
+        return
+
+    if not playlist_entries:
+        await ctx.send("플레이리스트 곡을 찾지 못했어")
+        return
+
+    lines = [f"📃 플레이리스트 곡 수: {len(playlist_entries)}", ""]
+    for idx, (title, _) in enumerate(playlist_entries[:20], start=1):
+        lines.append(f"{idx}. {title}")
+
+    if len(playlist_entries) > 20:
+        lines.append(f"... 외 {len(playlist_entries) - 20}곡")
+
+    for chunk in split_text("\n".join(lines), 1800):
+        await ctx.send(f"```{chunk}```")
+
+
+# =========================
+# 가사 기능
+# =========================
+@bot.command(name="가사")
+async def lyrics(ctx, *, song: str = None):
+    guild_id = ctx.guild.id if ctx.guild else None
+
+    if song is None and guild_id:
+        state = get_music_state(guild_id)
+        current = state.get("current")
+        if current:
+            song = current["title"]
+
+    if song is None:
+        await ctx.send("노래 제목 입력해줘. 예시: `/가사 아이유 - 밤편지`")
+        return
+
+    artist, title = extract_artist_title(song)
+
+    if not artist:
+        await ctx.send("가사는 `가수 - 제목` 형식이 가장 잘 돼. 예: `/가사 아이유 - 밤편지`")
+        return
+
+    async with aiohttp.ClientSession() as session:
+        url = f"https://api.lyrics.ovh/v1/{artist}/{title}"
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                await ctx.send("가사 못 찾음")
+                return
+            data = await resp.json()
+
+    text = data.get("lyrics", "없음")
+    chunks = split_text(text, 1800)
+
+    await ctx.send(f"📄 {artist} - {title}\n```{chunks[0]}```")
+    for chunk in chunks[1:]:
+        await ctx.send(f"```{chunk}```")
+
+
+# =========================
+# 도움말 명령어
+# =========================
+@bot.command(name="도움말")
+async def help_command(ctx):
+    await ctx.send("보고 싶은 기능을 골라줘", view=HelpView())
+
+
+@bot.command(name="쿠키상태")
+async def cookie_status(ctx):
+    cookie_file = resolve_cookie_file()
+    if cookie_file:
+        await ctx.send(
+            f"✅ cookies 적용 중\n경로: `{cookie_file}`\n"
+            f"IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'} | "
+            f"web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}"
+        )
+    else:
+        await ctx.send(
+            "⚠️ cookies.txt가 없어. 유튜브 차단이 걸리면 재생이 안 될 수 있어.\n"
+            f"IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'} | "
+            f"web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}"
+        )
+
+
+@bot.command(name="우회상태")
+async def bypass_status(ctx):
+    mode = "쿠키 사용" if resolve_cookie_file() else "쿠키 없이 우회 모드"
+    await ctx.send(
+        f"🛠 재생 모드: {mode}\n"
+        f"- web client 비활성화: {'켜짐' if YTDLP_DISABLE_WEB_CLIENT else '꺼짐'}\n"
+        f"- IPv4 강제: {'켜짐' if YTDLP_FORCE_IPV4 else '꺼짐'}"
+    )
+
+
+@bot.command(name="음악상태")
+async def music_status(ctx):
+    guild_id = ctx.guild.id
+    state = get_music_state(guild_id)
+    await ctx.send(
+        "🎧 음악 상태\n"
+        f"- 마지막 곡: {state.get('last_query') or '없음'}\n"
+        f"- 반복: {'켜짐' if state.get('repeat') else '꺼짐'}\n"
+        f"- 자동 스킵 수: {state.get('auto_skipped_count', 0)}\n"
+        f"- 차단 감지 수: {state.get('blocked_fail_count', 0)}"
+    )
+
+
+# =========================
+# 일정 명령어
+# =========================
+@bot.command(name="일정추가")
+async def add_schedule_cmd(ctx, date, time_input, *, text):
+    user_id = str(ctx.author.id)
+    user_name = ctx.author.display_name
+    color = user_colors.get(user_id, DEFAULT_COLOR)
+
+    schedule.append({
+        "datetime": f"{date} {time_input}",
+        "text": text,
+        "name": user_name,
+        "user_id": ctx.author.id,
+        "color": color,
+        "alert_enabled": False,
+        "alert_10min": False,
+        "channel_id": ctx.channel.id
+    })
+
+    save_schedule()
+    await ctx.send("✅ 일정 추가 완료")
+
+
+@bot.command(name="일정삭제")
+async def delete_schedule_cmd(ctx, index: int):
+    if index < 1 or index > len(schedule):
+        await ctx.send("❌ 잘못된 번호")
+        return
+
+    removed = schedule.pop(index - 1)
+    save_schedule()
+    await ctx.send(f"🗑️ 삭제 완료: {removed['datetime']} / {removed['text']}")
 
 
 @bot.command(name="캘린더")
@@ -2972,7 +3456,73 @@ def _schedule_sort_key(item):
     dt = parse_schedule_datetime(item.get("datetime", "")) or datetime.max
     return (dt, item.get("text", ""))
 
+@bot.tree.command(name="입장", description="현재 들어가 있는 음성 채널에 입장합니다")
+async def slash_join(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await join(InteractionCtx(interaction))
 
+@bot.tree.command(name="퇴장", description="음성 채널에서 퇴장합니다")
+async def slash_leave(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await leave(InteractionCtx(interaction))
+
+@bot.tree.command(name="재생", description="노래 제목이나 유튜브 링크를 재생합니다")
+@app_commands.describe(query="노래 제목 또는 유튜브 링크")
+async def slash_play(interaction: discord.Interaction, query: str):
+    await interaction.response.defer(thinking=True)
+    await play(InteractionCtx(interaction), query=query)
+
+@bot.tree.command(name="정지", description="현재 재생을 정지합니다")
+async def slash_stop(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await stop(InteractionCtx(interaction))
+
+@bot.tree.command(name="일시정지", description="현재 재생을 일시정지합니다")
+async def slash_pause(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await pause(InteractionCtx(interaction))
+
+@bot.tree.command(name="다시재생", description="일시정지된 곡을 다시 재생합니다")
+async def slash_resume(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await resume(InteractionCtx(interaction))
+
+@bot.tree.command(name="노래리스트", description="현재 대기열을 보여줍니다")
+async def slash_queue_list(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await queue_list(InteractionCtx(interaction))
+
+@bot.tree.command(name="플레이리스트정보", description="유튜브 플레이리스트 곡 목록을 보여줍니다")
+@app_commands.describe(query="유튜브 플레이리스트 URL")
+async def slash_playlist_info(interaction: discord.Interaction, query: str):
+    await interaction.response.defer(thinking=True)
+    await playlist_info(InteractionCtx(interaction), query=query)
+
+@bot.tree.command(name="가사", description="노래 가사를 찾아 보여줍니다")
+@app_commands.describe(song="가수 - 제목 또는 노래 제목")
+async def slash_lyrics(interaction: discord.Interaction, song: str):
+    await interaction.response.defer(thinking=True)
+    await lyrics(InteractionCtx(interaction), song=song)
+
+@bot.tree.command(name="도움말", description="명령어 도움말을 보여줍니다")
+async def slash_help(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await help_command(InteractionCtx(interaction))
+
+@bot.tree.command(name="쿠키상태", description="쿠키 적용 상태를 확인합니다")
+async def slash_cookie_status(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await cookie_status(InteractionCtx(interaction))
+
+@bot.tree.command(name="우회상태", description="우회 설정 상태를 확인합니다")
+async def slash_bypass_status(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await bypass_status(InteractionCtx(interaction))
+
+@bot.tree.command(name="음악상태", description="현재 음악 상태를 확인합니다")
+async def slash_music_status(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await music_status(InteractionCtx(interaction))
 
 @bot.tree.command(name="캘린더", description="캘린더를 표시합니다")
 @app_commands.describe(year="연도", month="월")
@@ -3173,602 +3723,10 @@ async def slash_delete_schedule(interaction: discord.Interaction, index: int):
     await interaction.response.defer(thinking=True)
     await delete_schedule_cmd(InteractionCtx(interaction), index=index)
 
-
-
-# =========================
-# TTS 자동 읽기 전용 설정
-# =========================
-TTS_SETTINGS_FILE = os.path.join(DATA_DIR, "tts_settings.json")
-TTS_VOICE_CHOICES = {
-    "선하": {"voice": "ko-KR-SunHiNeural", "tone": "밝고 부드러운 여성톤"},
-    "인준": {"voice": "ko-KR-InJoonNeural", "tone": "차분한 남성톤"},
-    "봉진": {"voice": "ko-KR-BongJinNeural", "tone": "또렷하고 단정한 남성톤"},
-    "국민": {"voice": "ko-KR-GookMinNeural", "tone": "무게감 있는 남성톤"},
-    "지민": {"voice": "ko-KR-JiMinNeural", "tone": "부드럽고 자연스러운 여성톤"},
-    "서현": {"voice": "ko-KR-SeoHyeonNeural", "tone": "맑고 안정적인 여성톤"},
-    "순복": {"voice": "ko-KR-SoonBokNeural", "tone": "연륜 있는 차분한 여성톤"},
-    "유진": {"voice": "ko-KR-YuJinNeural", "tone": "밝고 또렷한 여성톤"},
-    "현수": {"voice": "ko-KR-HyunsuNeural", "tone": "부드럽고 젊은 남성톤"},
-}
-
-
-def get_voice_info(label: str) -> dict:
-    return TTS_VOICE_CHOICES.get(label, {"voice": "ko-KR-SunHiNeural", "tone": "밝고 부드러운 여성톤"})
-
-
-def build_voice_guide_text() -> str:
-    lines = []
-    for label, info in TTS_VOICE_CHOICES.items():
-        lines.append(f"- {label}: {info['tone']}")
-    return "\n".join(lines)
-
-
-def build_tts_help_text() -> str:
-    return f"""🔊 TTS 도움말
-
-기본 명령어
-/입장 : 현재 음성 채널에 들어가고 자동 읽기를 켬
-/퇴장 : 음성 채널에서 나가고 자동 읽기를 끔
-
-설정
-/읽기채널 : 현재 채널을 읽기 채널로 설정
-/닉네임읽기 : 닉네임을 같이 읽을지 설정
-/목소리 : 한국어 이름으로 TTS 목소리 선택
-/속도 : 읽는 속도 조절 (예: 0.8 ~ 1.2)
-/톤 : 목소리 높낮이 조절 (예: 0.8 ~ 1.2)
-
-유저 필터
-/읽기제외추가, /읽기제외삭제 : 특정 유저 제외
-/읽기포함추가, /읽기포함삭제 : 특정 유저만 읽기
-/읽기대상초기화 : 포함/제외 설정 초기화
-
-상태 확인
-/읽기상태 : 현재 자동 읽기 상태 확인
-/tts도움말 : 이 도움말 다시 보기
-
-목소리 선택 목록
-{build_voice_guide_text()}
-
-🎤 목소리 설정 추천 조합
-💗 부드러운 기본 (추천)
-→ /목소리 선하 + /속도 1.0 + /톤 1.0
-
-🧑 차분한 남성톤
-→ /목소리 인준 + /속도 0.9 + /톤 0.9
-
-⚡ 빠르고 밝게
-→ /목소리 선하 + /속도 1.2 + /톤 1.1
-
-🎧 방송 느낌 (또박또박)
-→ /목소리 지민 + /속도 0.95 + /톤 1.0
-
-😴 느리고 안정적인 톤
-→ /목소리 서현 + /속도 0.8 + /톤 0.9
-
-💡 팁 : 속도는 0.9 ~ 1.1 사이가 가장 자연스럽고, 톤은 0.9 ~ 1.1 사이가 무난해요"""
-
-
-TTS_DEFAULT_SETTINGS = {
-    "enabled": False,
-    "read_nickname": True,
-    "text_channel_id": None,
-    "voice_channel_id": None,
-    "voice": "ko-KR-SunHiNeural",
-    "voice_label": "선하",
-    "rate": "+0%",
-    "pitch": "+0Hz",
-    "include_user_ids": [],
-    "exclude_user_ids": [],
-    "between_delay": 0.15,
-}
-
-tts_settings = {}
-tts_queues = {}
-tts_workers = {}
-tts_worker_locks = {}
-
-
-def load_tts_settings():
-    global tts_settings
-    if os.path.exists(TTS_SETTINGS_FILE):
-        try:
-            with open(TTS_SETTINGS_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            tts_settings = {str(k): {**TTS_DEFAULT_SETTINGS, **v} for k, v in raw.items() if isinstance(v, dict)}
-        except Exception as e:
-            print(f"tts_settings 로드 실패: {e}", flush=True)
-            tts_settings = {}
-    else:
-        tts_settings = {}
-
-
-def save_tts_settings():
-    try:
-        with open(TTS_SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(tts_settings, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"tts_settings 저장 실패: {e}", flush=True)
-
-
-def get_tts_settings(guild_id: int):
-    key = str(guild_id)
-    if key not in tts_settings:
-        tts_settings[key] = dict(TTS_DEFAULT_SETTINGS)
-    settings = tts_settings[key]
-    settings.setdefault("include_user_ids", [])
-    settings.setdefault("exclude_user_ids", [])
-    settings.setdefault("voice", "ko-KR-SunHiNeural")
-    settings.setdefault("voice_label", "선하")
-    settings.setdefault("rate", "+0%")
-    settings.setdefault("pitch", "+0Hz")
-    settings.setdefault("between_delay", 0.15)
-    return settings
-
-
-def normalize_rate(value: float) -> str:
-    value = max(0.5, min(2.0, float(value)))
-    percent = int(round((value - 1.0) * 100))
-    return f"{percent:+d}%"
-
-
-def normalize_pitch(value: float) -> str:
-    value = max(0.5, min(1.5, float(value)))
-    hz = int(round((value - 1.0) * 50))
-    return f"{hz:+d}Hz"
-
-
-def clean_tts_text(text: str) -> str:
-    text = (text or "").strip()
-    if not text:
-        return ""
-    text = re.sub(r'https?://\S+', '링크가 포함된 메시지', text)
-    text = re.sub(r'<a?:\w+:\d+>', '이모지', text)
-    text = re.sub(r'<@!?\d+>', '멘션', text)
-    text = re.sub(r'<#\d+>', '채널 멘션', text)
-    text = re.sub(r'@everyone|@here', '전체 멘션', text)
-    text = re.sub(r'(ㅋ){3,}', 'ㅋㅋ', text)
-    text = re.sub(r'(ㅎ){3,}', 'ㅎㅎ', text)
-    text = re.sub(r'(ㅠ){3,}', 'ㅠㅠ', text)
-    text = re.sub(r'(ㅜ){3,}', 'ㅜㅜ', text)
-    text = re.sub(r'[`*_~|]+', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-
-
-def should_read_user(settings: dict, user_id: int) -> bool:
-    include_ids = set(settings.get("include_user_ids") or [])
-    exclude_ids = set(settings.get("exclude_user_ids") or [])
-    if include_ids:
-        return user_id in include_ids
-    return user_id not in exclude_ids
-
-
-def build_voice_choices_text() -> str:
-    return ", ".join(TTS_VOICE_CHOICES.keys())
-
-
-def build_target_summary(settings: dict, guild: discord.Guild) -> str:
-    include_ids = settings.get("include_user_ids") or []
-    exclude_ids = settings.get("exclude_user_ids") or []
-    if include_ids:
-        names = []
-        for uid in include_ids:
-            member = guild.get_member(uid)
-            names.append(member.display_name if member else str(uid))
-        return "포함 전용: " + ", ".join(names)
-    if exclude_ids:
-        names = []
-        for uid in exclude_ids:
-            member = guild.get_member(uid)
-            names.append(member.display_name if member else str(uid))
-        return "제외: " + ", ".join(names)
-    return "전체"
-
-
-async def ensure_connected_to_saved_voice(guild: discord.Guild, settings: dict):
-    if guild is None:
-        raise RuntimeError("서버 안에서만 사용할 수 있어")
-    voice_channel_id = settings.get("voice_channel_id")
-    if not voice_channel_id:
-        raise RuntimeError("먼저 /입장으로 음성 채널에 연결해줘")
-
-    channel = guild.get_channel(voice_channel_id)
-    if channel is None:
-        channel = await bot.fetch_channel(voice_channel_id)
-
-    voice_client = guild.voice_client
-    if isinstance(voice_client, wavelink.Player):
-        try:
-            await voice_client.disconnect()
-        except Exception:
-            pass
-        voice_client = None
-
-    if voice_client is None:
-        voice_client = await channel.connect(self_deaf=False, self_mute=False)
-    elif voice_client.channel != channel:
-        await voice_client.move_to(channel)
-
-    return voice_client
-
-
-async def synthesize_edge_tts(text_value: str, settings: dict) -> str:
-    temp_path = os.path.join(TTS_TEMP_DIR, f"tts_{uuid.uuid4().hex}.mp3")
-    communicate = edge_tts.Communicate(
-        text_value,
-        voice=settings.get("voice", "ko-KR-SunHiNeural"),
-        rate=settings.get("rate", "+0%"),
-        pitch=settings.get("pitch", "+0Hz"),
-    )
-    await communicate.save(temp_path)
-    return temp_path
-
-
-async def play_tts_for_guild(guild: discord.Guild, text_value: str):
-    text_value = clean_tts_text(text_value)
-    if not text_value:
-        return
-
-    settings = get_tts_settings(guild.id)
-    voice_client = await ensure_connected_to_saved_voice(guild, settings)
-    temp_path = await synthesize_edge_tts(text_value, settings)
-
-    finished = asyncio.Event()
-
-    def after_play(error):
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except Exception:
-            pass
-        if error:
-            print(f"자동 TTS 재생 오류: {error}", flush=True)
-        bot.loop.call_soon_threadsafe(finished.set)
-
-    source = discord.FFmpegPCMAudio(temp_path)
-    voice_client.play(source, after=after_play)
-    await finished.wait()
-    await asyncio.sleep(max(0.0, float(settings.get("between_delay", 0.15))))
-
-
-async def enqueue_tts_message(guild: discord.Guild, text_value: str):
-    queue = tts_queues.setdefault(guild.id, asyncio.Queue())
-    await queue.put(text_value)
-
-    worker = tts_workers.get(guild.id)
-    if worker is None or worker.done():
-        tts_workers[guild.id] = bot.loop.create_task(tts_worker(guild))
-
-
-async def tts_worker(guild: discord.Guild):
-    queue = tts_queues.setdefault(guild.id, asyncio.Queue())
-    lock = tts_worker_locks.setdefault(guild.id, asyncio.Lock())
-    async with lock:
-        while True:
-            try:
-                text_value = await asyncio.wait_for(queue.get(), timeout=180)
-            except asyncio.TimeoutError:
-                break
-
-            try:
-                await play_tts_for_guild(guild, text_value)
-            except Exception as e:
-                print(f"tts worker 오류: {e}", flush=True)
-            finally:
-                queue.task_done()
-
-    tts_workers.pop(guild.id, None)
-
-
-async def enable_auto_tts(ctx_like, voice_channel: discord.VoiceChannel, text_channel: discord.abc.MessageableChannel):
-    guild = ctx_like.guild
-    if guild is None:
-        raise RuntimeError("서버 안에서만 사용할 수 있어")
-    voice_client = guild.voice_client
-    if isinstance(voice_client, wavelink.Player):
-        try:
-            await voice_client.disconnect()
-        except Exception:
-            pass
-        voice_client = None
-
-    if voice_client is None:
-        voice_client = await voice_channel.connect(self_deaf=False, self_mute=False)
-    elif voice_client.channel != voice_channel:
-        await voice_client.move_to(voice_channel)
-
-    settings = get_tts_settings(guild.id)
-    settings["enabled"] = True
-    settings["voice_channel_id"] = voice_channel.id
-    settings["text_channel_id"] = text_channel.id
-    save_tts_settings()
-    return settings
-
-
-async def disable_auto_tts(guild: discord.Guild):
-    settings = get_tts_settings(guild.id)
-    settings["enabled"] = False
-    save_tts_settings()
-    vc = guild.voice_client
-    if vc:
-        try:
-            await vc.disconnect()
-        except Exception:
-            pass
-
-
-def build_auto_tts_status(settings: dict, guild: discord.Guild, channel: discord.TextChannel | None = None) -> str:
-    read_nickname = "켜짐" if settings.get("read_nickname", True) else "꺼짐"
-    enabled = "켜짐" if settings.get("enabled") else "꺼짐"
-    channel_text = f"<#{channel.id}>" if channel else "없음"
-    voice_label = settings.get("voice_label", "선하")
-    voice_info = get_voice_info(voice_label)
-    voice_value = settings.get("voice", voice_info["voice"])
-    voice_tone = voice_info["tone"]
-    target_summary = build_target_summary(settings, guild)
-    return (
-        f"자동 읽기: {enabled}\n"
-        f"읽기 채널: {channel_text}\n"
-        f"닉네임 읽기: {read_nickname}\n"
-        f"목소리: {voice_label} - {voice_tone} ({voice_value})\n"
-        f"속도: {settings.get('rate', '+0%')}\n"
-        f"톤: {settings.get('pitch', '+0Hz')}\n"
-        f"읽기 대상: {target_summary}"
-    )
-
-
-for _name in ["입장", "퇴장", "재생", "일시정지", "다시재생", "스킵", "정지", "반복", "노래추가", "노래삭제", "가사", "도움말"]:
-    try:
-        bot.remove_command(_name)
-    except Exception:
-        pass
-    try:
-        bot.tree.remove_command(_name)
-    except Exception:
-        pass
-
-
-@bot.event
-async def on_ready():
-    global schedule_task_started, slash_sync_done
-    print(f"로그인 완료: {bot.user}", flush=True)
-
-    if not slash_sync_done:
-        slash_sync_done = True
-        print("슬래시 명령어 동기화는 setup_hook에서 글로벌 1회만 실행됨", flush=True)
-
-    try:
-        load_schedule()
-        load_colors()
-        load_tts_settings()
-
-        cleared = 0
-        for guild in bot.guilds:
-            try:
-                bot.tree.clear_commands(guild=guild)
-                await bot.tree.sync(guild=guild)
-                cleared += 1
-            except Exception as e:
-                print(f"[slash-cleanup] {guild.name} 길드 명령어 정리 실패: {e}", flush=True)
-        if cleared:
-            print(f"기존 길드 슬래시 명령어 정리 완료: {cleared}개 길드", flush=True)
-
-        if not schedule_task_started:
-            bot.loop.create_task(check_schedule())
-            schedule_task_started = True
-
-    except Exception as e:
-        print(f"초기화 오류: {e}", flush=True)
-
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    if not message.guild:
-        return
-
-    settings = get_tts_settings(message.guild.id)
-    if not settings.get("enabled"):
-        return
-
-    if message.channel.id != settings.get("text_channel_id"):
-        return
-
-    if not message.guild.voice_client:
-        return
-
-    if not should_read_user(settings, message.author.id):
-        return
-
-    text_value = clean_tts_text(message.content)
-    if not text_value:
-        return
-
-    if settings.get("read_nickname", True):
-        text_value = f"{message.author.display_name}님, {text_value}"
-
-    await enqueue_tts_message(message.guild, text_value)
-
-
-@bot.tree.command(name="입장", description="현재 음성 채널에 들어가고 이 채널의 채팅을 자동으로 읽습니다")
-async def slash_tts_join(interaction: discord.Interaction):
-    try:
-        if interaction.user.voice is None or interaction.user.voice.channel is None:
-            await interaction.response.send_message("❌ 먼저 음성 채널에 들어가 있어야 해", ephemeral=True)
-            return
-        settings = await enable_auto_tts(InteractionCtx(interaction), interaction.user.voice.channel, interaction.channel)
-        await interaction.response.send_message(
-            "✅ 자동 읽기 TTS를 켰어\n" + build_auto_tts_status(settings, interaction.guild, interaction.channel),
-            ephemeral=True,
-        )
-    except Exception as e:
-        await interaction.response.send_message(f"❌ 입장 실패: {e}", ephemeral=True)
-
-
-@bot.tree.command(name="퇴장", description="음성 채널에서 나가고 자동 읽기를 끕니다")
-async def slash_tts_leave(interaction: discord.Interaction):
-    try:
-        await disable_auto_tts(interaction.guild)
-        await interaction.response.send_message("👋 음성 채널에서 나갔고 자동 읽기를 껐어", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ 퇴장 실패: {e}", ephemeral=True)
-
-
-@bot.tree.command(name="닉네임읽기", description="자동 읽기에서 닉네임을 같이 읽을지 설정합니다")
-@app_commands.describe(mode="켜기 또는 끄기")
-@app_commands.choices(mode=[
-    app_commands.Choice(name="켜기", value="켜기"),
-    app_commands.Choice(name="끄기", value="끄기"),
-])
-async def slash_nickname_tts(interaction: discord.Interaction, mode: app_commands.Choice[str]):
-    settings = get_tts_settings(interaction.guild.id)
-    settings["read_nickname"] = (mode.value == "켜기")
-    save_tts_settings()
-    await interaction.response.send_message(
-        f"✅ 닉네임 읽기: {'켜짐' if settings['read_nickname'] else '꺼짐'}",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="읽기채널", description="현재 채널을 자동 읽기 채널로 설정합니다")
-async def slash_reading_channel(interaction: discord.Interaction):
-    settings = get_tts_settings(interaction.guild.id)
-    settings["text_channel_id"] = interaction.channel.id
-    save_tts_settings()
-    await interaction.response.send_message(
-        f"✅ 이제 이 채널에서 올라오는 채팅만 자동으로 읽어줄게: {interaction.channel.mention}",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="tts도움말", description="TTS 자동 읽기 명령어 도움말을 보여줍니다")
-async def slash_tts_help(interaction: discord.Interaction):
-    await interaction.response.send_message(build_tts_help_text(), ephemeral=True)
-
-
-@bot.tree.command(name="목소리", description="자동 읽기 TTS 목소리를 바꿉니다")
-@app_commands.describe(종류="이름과 톤 설명을 보고 원하는 목소리를 선택")
-@app_commands.choices(종류=[
-    app_commands.Choice(name="선하 - 밝고 부드러운 여성톤", value="선하"),
-    app_commands.Choice(name="인준 - 차분한 남성톤", value="인준"),
-    app_commands.Choice(name="봉진 - 또렷하고 단정한 남성톤", value="봉진"),
-    app_commands.Choice(name="국민 - 무게감 있는 남성톤", value="국민"),
-    app_commands.Choice(name="지민 - 부드럽고 자연스러운 여성톤", value="지민"),
-    app_commands.Choice(name="서현 - 맑고 안정적인 여성톤", value="서현"),
-    app_commands.Choice(name="순복 - 연륜 있는 차분한 여성톤", value="순복"),
-    app_commands.Choice(name="유진 - 밝고 또렷한 여성톤", value="유진"),
-    app_commands.Choice(name="현수 - 부드럽고 젊은 남성톤", value="현수"),
-])
-async def slash_tts_voice(interaction: discord.Interaction, 종류: app_commands.Choice[str]):
-    settings = get_tts_settings(interaction.guild.id)
-    voice_info = get_voice_info(종류.value)
-    settings["voice_label"] = 종류.value
-    settings["voice"] = voice_info["voice"]
-    save_tts_settings()
-    await interaction.response.send_message(
-        f"✅ 목소리를 {종류.value}로 바꿨어\n톤: {voice_info['tone']}\n현재 음성: {settings['voice']}",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="속도", description="자동 읽기 속도를 조절합니다")
-@app_commands.describe(배속="0.5 ~ 2.0 사이로 입력, 기본은 1.0")
-async def slash_tts_rate(interaction: discord.Interaction, 배속: float):
-    settings = get_tts_settings(interaction.guild.id)
-    settings["rate"] = normalize_rate(배속)
-    save_tts_settings()
-    await interaction.response.send_message(
-        f"✅ 읽기 속도를 {배속:.2f}배 느낌으로 바꿨어 ({settings['rate']})",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="톤", description="자동 읽기 톤을 조절합니다")
-@app_commands.describe(높이="0.5 ~ 1.5 사이로 입력, 기본은 1.0")
-async def slash_tts_pitch(interaction: discord.Interaction, 높이: float):
-    settings = get_tts_settings(interaction.guild.id)
-    settings["pitch"] = normalize_pitch(높이)
-    save_tts_settings()
-    await interaction.response.send_message(
-        f"✅ 읽기 톤을 {높이:.2f} 기준으로 바꿨어 ({settings['pitch']})",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="읽기제외추가", description="특정 유저를 자동 읽기에서 제외합니다")
-@app_commands.describe(유저="읽지 않을 유저")
-async def slash_tts_exclude_add(interaction: discord.Interaction, 유저: discord.Member):
-    settings = get_tts_settings(interaction.guild.id)
-    exclude_ids = set(settings.get("exclude_user_ids") or [])
-    exclude_ids.add(유저.id)
-    include_ids = set(settings.get("include_user_ids") or [])
-    if 유저.id in include_ids:
-        include_ids.remove(유저.id)
-    settings["exclude_user_ids"] = list(exclude_ids)
-    settings["include_user_ids"] = list(include_ids)
-    save_tts_settings()
-    await interaction.response.send_message(f"✅ {유저.display_name} 님을 읽기 제외에 추가했어", ephemeral=True)
-
-
-@bot.tree.command(name="읽기제외삭제", description="자동 읽기 제외 목록에서 유저를 제거합니다")
-@app_commands.describe(유저="다시 읽을 유저")
-async def slash_tts_exclude_remove(interaction: discord.Interaction, 유저: discord.Member):
-    settings = get_tts_settings(interaction.guild.id)
-    exclude_ids = set(settings.get("exclude_user_ids") or [])
-    exclude_ids.discard(유저.id)
-    settings["exclude_user_ids"] = list(exclude_ids)
-    save_tts_settings()
-    await interaction.response.send_message(f"✅ {유저.display_name} 님을 제외 목록에서 뺐어", ephemeral=True)
-
-
-@bot.tree.command(name="읽기포함추가", description="특정 유저만 읽도록 포함 목록에 추가합니다")
-@app_commands.describe(유저="읽을 유저")
-async def slash_tts_include_add(interaction: discord.Interaction, 유저: discord.Member):
-    settings = get_tts_settings(interaction.guild.id)
-    include_ids = set(settings.get("include_user_ids") or [])
-    include_ids.add(유저.id)
-    exclude_ids = set(settings.get("exclude_user_ids") or [])
-    if 유저.id in exclude_ids:
-        exclude_ids.remove(유저.id)
-    settings["include_user_ids"] = list(include_ids)
-    settings["exclude_user_ids"] = list(exclude_ids)
-    save_tts_settings()
-    await interaction.response.send_message(
-        f"✅ {유저.display_name} 님을 포함 목록에 추가했어\n포함 목록이 하나라도 있으면 그 사람들만 읽어",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="읽기포함삭제", description="포함 목록에서 유저를 제거합니다")
-@app_commands.describe(유저="제거할 유저")
-async def slash_tts_include_remove(interaction: discord.Interaction, 유저: discord.Member):
-    settings = get_tts_settings(interaction.guild.id)
-    include_ids = set(settings.get("include_user_ids") or [])
-    include_ids.discard(유저.id)
-    settings["include_user_ids"] = list(include_ids)
-    save_tts_settings()
-    await interaction.response.send_message(f"✅ {유저.display_name} 님을 포함 목록에서 뺐어", ephemeral=True)
-
-
-@bot.tree.command(name="읽기대상초기화", description="포함/제외 대상을 전부 초기화하고 다시 전체 읽기로 돌립니다")
-async def slash_tts_target_reset(interaction: discord.Interaction):
-    settings = get_tts_settings(interaction.guild.id)
-    settings["include_user_ids"] = []
-    settings["exclude_user_ids"] = []
-    save_tts_settings()
-    await interaction.response.send_message("✅ 읽기 대상 설정을 초기화했어. 이제 다시 전체를 읽어", ephemeral=True)
-
-
-@bot.tree.command(name="읽기상태", description="자동 읽기 상태와 목소리 설정을 보여줍니다")
-async def slash_tts_status(interaction: discord.Interaction):
-    settings = get_tts_settings(interaction.guild.id)
-    channel = interaction.guild.get_channel(settings.get("text_channel_id")) if settings.get("text_channel_id") else None
-    await interaction.response.send_message(
-        "ℹ️ 현재 자동 읽기 상태\n" + build_auto_tts_status(settings, interaction.guild, channel),
-        ephemeral=True,
-    )
+@bot.tree.command(name="재시동", description="봇을 재시동합니다")
+async def slash_restart(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await restart(InteractionCtx(interaction))
 
 
 bot.run(TOKEN)
